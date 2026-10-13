@@ -1,0 +1,10 @@
+services:
+  wis-fel-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    stop_grace_period: 30s
+    environment:
+      DOTNET_ENVIRONMENT: Production
+      Logging__LogLevel__Default: Information

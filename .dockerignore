@@ -1,0 +1,13 @@
+.git
+.vs
+.vscode
+**/bin/
+**/obj/
+**/.DS_Store
+**/.env*
+**/appsettings.*.local.json
+**/*.p12
+**/*.pfx
+**/*.pem
+**/*.key
+TestResults/

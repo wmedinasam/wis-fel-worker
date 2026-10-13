@@ -1,1 +1,18 @@
 .vscode
+
+# .NET build outputs
+**/bin/
+**/obj/
+.vs/
+
+# User-specific IDE files
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# Test results
+TestResults/
+
+# Local configuration and secrets
+appsettings.*.local.json

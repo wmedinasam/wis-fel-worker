@@ -1,0 +1,5 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/WisFel.Worker/WisFel.Worker.csproj" />
+  </Folder>
+</Solution>
