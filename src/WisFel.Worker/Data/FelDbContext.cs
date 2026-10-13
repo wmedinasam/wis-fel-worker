@@ -6,6 +6,8 @@ public sealed class FelDbContext(DbContextOptions<FelDbContext> options) : DbCon
 {
     public DbSet<SaeCompany> SaeCompanies => Set<SaeCompany>();
 
+    public DbSet<SaeCommonQuery> SaeCommonQueries => Set<SaeCommonQuery>();
+
     public DbSet<SaeDocumentQuery> SaeDocumentQueries => Set<SaeDocumentQuery>();
 
     public DbSet<Document> Documents => Set<Document>();
@@ -50,7 +52,6 @@ public sealed class FelDbContext(DbContextOptions<FelDbContext> options) : DbCon
             entity.Property(query => query.DocumentType).HasMaxLength(10).IsRequired();
             entity.Property(query => query.DocumentSql).HasColumnType("nvarchar(max)").IsRequired();
             entity.Property(query => query.IssuerSql).HasColumnType("nvarchar(max)").IsRequired();
-            entity.Property(query => query.ReceiverSql).HasColumnType("nvarchar(max)").IsRequired();
             entity.Property(query => query.ItemsSql).HasColumnType("nvarchar(max)").IsRequired();
             entity.Property(query => query.FreeFieldsSql).HasColumnType("nvarchar(max)").IsRequired();
             entity.Property(query => query.IsEnabled).HasDefaultValue(true);
@@ -59,6 +60,28 @@ public sealed class FelDbContext(DbContextOptions<FelDbContext> options) : DbCon
                 .HasForeignKey(query => query.CompanyId)
                 .OnDelete(DeleteBehavior.Cascade);
             entity.HasIndex(query => new { query.CompanyId, query.SaeVersion, query.DocumentType })
+                .IsUnique();
+        });
+
+        modelBuilder.Entity<SaeCommonQuery>(entity =>
+        {
+            entity.ToTable("SaeCommonQueries", table =>
+            {
+                table.HasCheckConstraint(
+                    "CK_SaeCommonQueries_SaeVersion",
+                    "[SaeVersion] >= 4.0 AND [SaeVersion] * 10 = FLOOR([SaeVersion] * 10)");
+            });
+
+            entity.HasKey(query => query.Id);
+            entity.Property(query => query.SaeVersion).HasPrecision(18, 1);
+            entity.Property(query => query.CustomerSql).HasColumnType("nvarchar(max)").IsRequired();
+            entity.Property(query => query.ProductSql).HasColumnType("nvarchar(max)").IsRequired();
+            entity.Property(query => query.IsEnabled).HasDefaultValue(true);
+            entity.HasOne<SaeCompany>()
+                .WithMany()
+                .HasForeignKey(query => query.CompanyId)
+                .OnDelete(DeleteBehavior.Cascade);
+            entity.HasIndex(query => new { query.CompanyId, query.SaeVersion })
                 .IsUnique();
         });
 

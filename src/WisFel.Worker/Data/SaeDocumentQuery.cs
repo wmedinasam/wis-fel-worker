@@ -11,7 +11,6 @@ public sealed class SaeDocumentQuery
         string documentType,
         string documentSql,
         string issuerSql,
-        string receiverSql,
         string itemsSql,
         string freeFieldsSql)
     {
@@ -31,7 +30,6 @@ public sealed class SaeDocumentQuery
         DocumentType = documentType;
         DocumentSql = RequireQuery(documentSql, nameof(documentSql));
         IssuerSql = RequireQuery(issuerSql, nameof(issuerSql));
-        ReceiverSql = RequireQuery(receiverSql, nameof(receiverSql));
         ItemsSql = RequireQuery(itemsSql, nameof(itemsSql));
         FreeFieldsSql = RequireQuery(freeFieldsSql, nameof(freeFieldsSql));
         IsEnabled = true;
@@ -48,8 +46,6 @@ public sealed class SaeDocumentQuery
     public string DocumentSql { get; private set; } = string.Empty;
 
     public string IssuerSql { get; private set; } = string.Empty;
-
-    public string ReceiverSql { get; private set; } = string.Empty;
 
     public string ItemsSql { get; private set; } = string.Empty;
 

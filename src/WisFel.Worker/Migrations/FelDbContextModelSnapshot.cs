@@ -99,6 +99,45 @@ namespace WisFel.Worker.Migrations
                         });
                 });
 
+            modelBuilder.Entity("WisFel.Worker.Data.SaeCommonQuery", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("int");
+
+                    SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<int>("Id"));
+
+                    b.Property<int>("CompanyId")
+                        .HasColumnType("int");
+
+                    b.Property<string>("CustomerSql")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<bool>("IsEnabled")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bit")
+                        .HasDefaultValue(true);
+
+                    b.Property<string>("ProductSql")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<decimal>("SaeVersion")
+                        .HasPrecision(18, 1)
+                        .HasColumnType("decimal(18,1)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("CompanyId", "SaeVersion")
+                        .IsUnique();
+
+                    b.ToTable("SaeCommonQueries", null, t =>
+                        {
+                            t.HasCheckConstraint("CK_SaeCommonQueries_SaeVersion", "[SaeVersion] >= 4.0 AND [SaeVersion] * 10 = FLOOR([SaeVersion] * 10)");
+                        });
+                });
+
             modelBuilder.Entity("WisFel.Worker.Data.SaeCompany", b =>
                 {
                     b.Property<int>("Id")
@@ -174,10 +213,6 @@ namespace WisFel.Worker.Migrations
                         .IsRequired()
                         .HasColumnType("nvarchar(max)");
 
-                    b.Property<string>("ReceiverSql")
-                        .IsRequired()
-                        .HasColumnType("nvarchar(max)");
-
                     b.Property<decimal>("SaeVersion")
                         .HasPrecision(18, 1)
                         .HasColumnType("decimal(18,1)");
@@ -204,6 +239,15 @@ namespace WisFel.Worker.Migrations
                         .IsRequired();
 
                     b.Navigation("Company");
+                });
+
+            modelBuilder.Entity("WisFel.Worker.Data.SaeCommonQuery", b =>
+                {
+                    b.HasOne("WisFel.Worker.Data.SaeCompany", null)
+                        .WithMany()
+                        .HasForeignKey("CompanyId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
                 });
 
             modelBuilder.Entity("WisFel.Worker.Data.SaeDocumentQuery", b =>

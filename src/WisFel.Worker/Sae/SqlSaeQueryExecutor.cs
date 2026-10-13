@@ -11,12 +11,13 @@ public sealed class SqlSaeQueryExecutor : ISaeQueryExecutor
         string connectionString,
         string query,
         Document document,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string? productCode = null)
     {
         using var connection = new SqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
 
-        using var command = CreateCommand(connection, query, document);
+        using var command = CreateCommand(connection, query, document, productCode);
         using var reader = await command.ExecuteReaderAsync(cancellationToken);
         RequireColumns(reader, SaeQueryResultContract.JsonColumn);
 
@@ -85,7 +86,11 @@ public sealed class SqlSaeQueryExecutor : ISaeQueryExecutor
         return fields;
     }
 
-    private static SqlCommand CreateCommand(SqlConnection connection, string query, Document document)
+    private static SqlCommand CreateCommand(
+        SqlConnection connection,
+        string query,
+        Document document,
+        string? productCode = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(query);
         ArgumentNullException.ThrowIfNull(document);
@@ -99,7 +104,8 @@ public sealed class SqlSaeQueryExecutor : ISaeQueryExecutor
             document.InternalNumber,
             document.InternalSerial,
             document.LocationId,
-            document.DocumentType));
+            document.DocumentType,
+            productCode));
 
         return command;
     }
@@ -109,14 +115,15 @@ public sealed class SqlSaeQueryExecutor : ISaeQueryExecutor
         string internalNumber,
         string internalSerial,
         int locationId,
-        string documentType)
+        string documentType,
+        string? productCode = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(internalNumber);
         ArgumentException.ThrowIfNullOrWhiteSpace(internalSerial);
         ArgumentException.ThrowIfNullOrWhiteSpace(documentType);
 
-        return
-        [
+        var parameters = new List<SqlParameter>
+        {
             new SqlParameter("@InternalId", SqlDbType.Int) { Value = internalId },
             new SqlParameter("@InternalNumber", SqlDbType.NVarChar, 50) { Value = internalNumber },
             new SqlParameter("@InternalSerial", SqlDbType.NVarChar, 20) { Value = internalSerial },
@@ -125,7 +132,18 @@ public sealed class SqlSaeQueryExecutor : ISaeQueryExecutor
             {
                 Value = documentType.Trim().ToUpperInvariant()
             }
-        ];
+        };
+
+        if (productCode is not null)
+        {
+            ArgumentException.ThrowIfNullOrWhiteSpace(productCode);
+            parameters.Add(new SqlParameter("@ProductCode", SqlDbType.NVarChar, 50)
+            {
+                Value = productCode.Trim()
+            });
+        }
+
+        return parameters.ToArray();
     }
 
     private static void RequireColumns(SqlDataReader reader, params string[] expectedColumns)

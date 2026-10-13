@@ -45,7 +45,22 @@ public sealed class SaeDocumentReader(
             throw new InvalidOperationException("Missing ConnectionStrings:FEL.");
         }
 
-        var queryTemplate = await felDbContext.SaeDocumentQueries
+        var commonQueries = await felDbContext.SaeCommonQueries
+            .AsNoTracking()
+            .SingleOrDefaultAsync(
+                query => query.CompanyId == company.Id &&
+                         query.SaeVersion == company.SaeVersion &&
+                         query.IsEnabled,
+                cancellationToken);
+
+        if (commonQueries is null)
+        {
+            throw new InvalidOperationException(
+                $"No enabled common SAE query configuration exists for company {company.Id} " +
+                $"and version {company.SaeVersion}.");
+        }
+
+        var documentQueries = await felDbContext.SaeDocumentQueries
             .AsNoTracking()
             .SingleOrDefaultAsync(
                 query => query.CompanyId == company.Id &&
@@ -54,7 +69,7 @@ public sealed class SaeDocumentReader(
                          query.IsEnabled,
                 cancellationToken);
 
-        if (queryTemplate is null)
+        if (documentQueries is null)
         {
             throw new InvalidOperationException(
                 $"No enabled SAE query template exists for company {company.Id}, " +
@@ -64,30 +79,49 @@ public sealed class SaeDocumentReader(
         var saeConnectionString = SaeConnectionStringFactory.Create(sharedConnectionString, company);
         var documentFields = await ReadSingleObjectAsync(
             saeConnectionString,
-            queryTemplate.DocumentSql,
+            documentQueries.DocumentSql,
             document,
             "Document",
             cancellationToken);
         var issuer = await ReadSingleObjectAsync(
             saeConnectionString,
-            queryTemplate.IssuerSql,
+            documentQueries.IssuerSql,
             document,
             "Issuer",
             cancellationToken);
         var receiver = await ReadSingleObjectAsync(
             saeConnectionString,
-            queryTemplate.ReceiverSql,
+            commonQueries.CustomerSql,
             document,
-            "Receiver",
+            "Customer",
             cancellationToken);
         var itemRows = await queryExecutor.ExecuteJsonObjectsAsync(
             saeConnectionString,
-            queryTemplate.ItemsSql,
+            documentQueries.ItemsSql,
             document,
             cancellationToken);
+        var productsByCode = new Dictionary<string, JsonObject>(StringComparer.Ordinal);
+        foreach (var item in itemRows)
+        {
+            var productCode = SaeItemProductMapping.GetProductCode(item);
+            if (!productsByCode.TryGetValue(productCode, out var product))
+            {
+                product = await ReadSingleObjectAsync(
+                    saeConnectionString,
+                    commonQueries.ProductSql,
+                    document,
+                    "Product",
+                    cancellationToken,
+                    productCode);
+                productsByCode.Add(productCode, product);
+            }
+
+            SaeItemProductMapping.SetProduct(item, product.DeepClone().AsObject());
+        }
+
         var freeFields = await queryExecutor.ExecuteFreeFieldsAsync(
             saeConnectionString,
-            queryTemplate.FreeFieldsSql,
+            documentQueries.FreeFieldsSql,
             document,
             cancellationToken);
 
@@ -122,13 +156,15 @@ public sealed class SaeDocumentReader(
         string query,
         Document document,
         string section,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string? productCode = null)
     {
         var rows = await queryExecutor.ExecuteJsonObjectsAsync(
             connectionString,
             query,
             document,
-            cancellationToken);
+            cancellationToken,
+            productCode);
 
         if (rows.Count != 1)
         {

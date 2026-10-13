@@ -9,7 +9,8 @@ public interface ISaeQueryExecutor
         string connectionString,
         string query,
         Document document,
-        CancellationToken cancellationToken);
+        CancellationToken cancellationToken,
+        string? productCode = null);
 
     Task<IReadOnlyList<SaeFreeFieldValue>> ExecuteFreeFieldsAsync(
         string connectionString,

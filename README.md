@@ -26,7 +26,7 @@ Cada empresa SAE tiene una base de datos independiente. El cliente comparte el s
 
 Este repositorio contiene la solución, el proyecto Worker, configuración Docker, el modelo de configuración/licencia de empresas SAE y la base reutilizable para consultar SAE y componer un JSON provisional. La conexión de desarrollo a SQL Server se configura mediante User Secrets y, en Development, el worker aplica migraciones al arrancar. El consumo automático de la cola, el envío al API, comandos, heartbeat y sincronización de licencias con la nube todavía están pendientes.
 
-Las migraciones crean `FEL` si hace falta, mantienen `SaeCompanies`, `SaeDocumentQueries` y `dbo.Documents` para la cola. Todavía no se incluyen tablas de detalle, stored procedures ni el trigger de SAE.
+Las migraciones crean `FEL` si hace falta, mantienen `SaeCompanies`, `SaeCommonQueries`, `SaeDocumentQueries` y `dbo.Documents` para la cola. Todavía no se incluyen tablas de detalle, stored procedures ni el trigger de SAE.
 
 ## Cola local de documentos
 
@@ -72,19 +72,32 @@ El nodo `Document` admite además las propiedades dinámicas de cabecera obtenid
 
 ## Consultas SAE configurables
 
-`dbo.SaeDocumentQueries` conserva una plantilla por empresa, versión de SAE y tipo de documento. La migración crea la tabla, pero no inserta plantillas de ejemplo: antes de usar el lector se deben cargar y ajustar consultas para el esquema real de cada instalación. Así se pueden personalizar columnas y expresiones SQL en FEL sin generar un stored procedure por empresa o modificar el Worker. No se ejecuta DDL ni se modifican las bases SAE.
+Las consultas comunes y las consultas específicas de documento tienen alcances distintos, de modo que un ajuste a cliente o catálogo de productos se comparte entre tipos de comprobante sin impedir que las partidas cambien con su tabla de origen:
 
-Cada plantilla contiene cinco consultas editables en SQL Server:
+| Tabla FEL | Alcance | Consultas |
+| --- | --- | --- |
+| `dbo.SaeCommonQueries` | Una fila por empresa y versión SAE; compartida por todos sus tipos documentales | `CustomerSql` y `ProductSql` |
+| `dbo.SaeDocumentQueries` | Una fila por empresa, versión SAE y tipo de documento | `DocumentSql`, `IssuerSql`, `ItemsSql` y `FreeFieldsSql` |
+
+La migración crea la estructura, pero no carga plantillas genéricas: se deben configurar las sentencias para el esquema real del cliente en SQL Server. No se crean procedimientos por tipo o empresa y no se ejecuta DDL ni se modifican las bases SAE.
+
+Las consultas comunes son:
+
+| Columna | Resultado esperado |
+| --- | --- |
+| `CustomerSql` | Una fila y una columna `Json` con el objeto del cliente que se coloca en `Document.Receiver`. |
+| `ProductSql` | Una fila y una columna `Json` con los datos del producto buscado en `INVE{suffix}`. Se invoca una vez por código de producto distinto presente en el documento con su `@ProductCode`, y el resultado se agrega a `Items[].Product`. |
+
+Las consultas específicas por documento son:
 
 | Columna | Resultado esperado |
 | --- | --- |
 | `DocumentSql` | Una fila y una columna `Json` con objeto JSON; sus propiedades se agregan a `Document`. |
 | `IssuerSql` | Una fila y una columna `Json` con objeto JSON para `Issuer`. |
-| `ReceiverSql` | Una fila y una columna `Json` con objeto JSON para `Receiver`. |
-| `ItemsSql` | Cero o más filas, cada una con una columna `Json` que contiene un objeto JSON de partida. |
+| `ItemsSql` | Cero o más filas, cada una con una columna `Json` para una partida. Cada objeto debe incluir `ProductCode` como texto no vacío; las partidas pueden venir de `PAR_FACTF{suffix}`, `PAR_FACTD{suffix}` u otra tabla según el tipo. |
 | `FreeFieldsSql` | Cero o más filas con las columnas `Name` y `Value`; `Name` debe ser no nulo, no vacío y único. `Value` puede ser nulo. |
 
-Las cinco consultas reciben estos parámetros SQL tipados, que deben referenciarse como parámetros y no interpolarse como texto:
+Las consultas comunes de cliente y las consultas documentales reciben estos parámetros SQL tipados, que deben referenciarse como parámetros y no interpolarse como texto:
 
 | Parámetro | Tipo | Origen |
 | --- | --- | --- |
@@ -94,9 +107,13 @@ Las cinco consultas reciben estos parámetros SQL tipados, que deben referenciar
 | `@LocationId` | `int` | Ubicación SAE |
 | `@DocumentType` | `nvarchar(10)` | Código del tipo en mayúsculas |
 
-Las consultas pueden usar `FOR JSON PATH, WITHOUT_ARRAY_WRAPPER` para producir los objetos esperados y conservar la libertad de seleccionar, concatenar o transformar campos. Los nombres reales de tablas y columnas dependen de la versión y personalización SAE; a modo orientativo, facturas pueden leer `FACTF{suffix}`, partidas `PAR_FACTF{suffix}`, campos libres `FACF_CLIB{suffix}` e inventario `INVE{suffix}`. Notas de crédito pueden utilizar `FACTD{suffix}` y `PAR_FACTD{suffix}`. Estos ejemplos no constituyen una plantilla lista para producción ni cubren todos los tipos documentales.
+`ProductSql` recibe además `@ProductCode` (`nvarchar(50)`) con el código emitido por `ItemsSql`. La tabla de inventario debe derivarse de la base SAE de la empresa, típicamente `INVE{suffix}`; las partidas sí son configurables por tipo documental, por ejemplo `PAR_FACTF{suffix}` en facturas y `PAR_FACTD{suffix}` en notas de crédito. El SQL configurable debe devolver `ProductCode` en cada resultado de partida y un objeto JSON de producto por código.
 
-El lector solo permite documentos `Pending`, exige que la empresa pertenezca al documento y que la política de licencia permita el envío. No cambia el estado ni llama `SaveChanges`; el componente que lo invoque debe persistir los cambios cuando corresponda. Las consultas configuradas son SQL ejecutable y el Worker no analiza su texto para impedir comandos de escritura. Por ello, la cuenta SQL que el Worker usa para conectarse a las bases SAE debe tener permisos de solo lectura; limita también quién puede modificar `SaeDocumentQueries`. El lector abre conexiones a SAE para ejecutar las secciones; no hay todavía consumo continuo de la cola ni administración de plantillas desde una UI.
+Las consultas pueden usar `FOR JSON PATH, WITHOUT_ARRAY_WRAPPER` para producir objetos y conservar libertad para seleccionar, concatenar o transformar campos. Los nombres reales de columnas y relaciones dependen de la versión y personalización SAE; los nombres de tablas mencionados son orientativos, no plantillas listas para producción.
+
+Al pasar a las consultas comunes, la migración traslada `ReceiverSql` a `CustomerSql` solo cuando el SQL coincide entre todos los tipos de una empresa/versión. Crea esa configuración común como deshabilitada y con `ProductSql` vacío para exigir que un DBA configure el producto desde `INVE` y habilite expresamente la fila. Si había consultas de cliente distintas por tipo, la migración se detiene sin eliminar datos: consolida primero `ReceiverSql` para esos tipos y vuelve a aplicar la migración. No habilites una configuración común hasta completar ambas consultas.
+
+El lector solo permite documentos `Pending`, exige que la empresa pertenezca al documento y que la política de licencia permita el envío. No cambia el estado ni llama `SaveChanges`; el componente que lo invoque debe persistir los cambios cuando corresponda. Las consultas configuradas son SQL ejecutable y el Worker no analiza su texto para impedir comandos de escritura. Por ello, la cuenta SQL que el Worker usa para conectarse a las bases SAE debe tener permisos de solo lectura; limita también quién puede modificar las tablas de consulta. El lector abre conexiones SAE para las secciones; no hay todavía consumo continuo de la cola ni administración de plantillas desde una UI.
 
 ### Seguridad del payload
 
@@ -135,7 +152,7 @@ dotnet user-secrets set "ConnectionStrings:FEL" "<cadena-de-conexion-local>" --p
 
 El servidor local debe aceptar conexiones TCP en el puerto 1433 y el login configurado debe tener permiso para crear la base y aplicar migraciones.
 
-El proyecto de desarrollo aplica las migraciones automáticamente al iniciar en `Development`. Las migraciones de empresas y documentos se añaden a FEL al iniciar después de actualizar el código.
+El proyecto de desarrollo aplica las migraciones automáticamente al iniciar en `Development`. Las migraciones de empresas, documentos y consultas compartidas SAE se añaden a FEL al iniciar después de actualizar el código.
 
 Al ejecutar con el perfil Development, el worker llama `Database.MigrateAsync()` durante el arranque. EF Core crea `FEL` si no existe y aplica las migraciones pendientes. También se puede aplicar manualmente:
 
