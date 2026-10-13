@@ -6,6 +6,8 @@ public sealed class FelDbContext(DbContextOptions<FelDbContext> options) : DbCon
 {
     public DbSet<SaeCompany> SaeCompanies => Set<SaeCompany>();
 
+    public DbSet<Document> Documents => Set<Document>();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         modelBuilder.Entity<SaeCompany>(entity =>
@@ -27,6 +29,47 @@ public sealed class FelDbContext(DbContextOptions<FelDbContext> options) : DbCon
             entity.Property(company => company.SaeVersion).HasPrecision(18, 1);
             entity.Property(company => company.IsLicensed).HasDefaultValue(false);
             entity.HasIndex(company => new { company.SaeVersion, company.CompanyNumber }).IsUnique();
+        });
+
+        modelBuilder.Entity<Document>(entity =>
+        {
+            entity.ToTable("Documents", table =>
+            {
+                table.HasCheckConstraint(
+                    "CK_Documents_Status",
+                    "[Status] IN (N'Pending', N'Processing', N'Signed', N'Delivered', N'Rejected', N'Failed')");
+            });
+
+            entity.HasKey(document => document.Id);
+            entity.Property(document => document.Status)
+                .HasConversion<string>()
+                .HasMaxLength(20)
+                .HasDefaultValue(DocumentStatus.Pending);
+            entity.Property(document => document.InternalNumber).HasMaxLength(50).IsRequired();
+            entity.Property(document => document.InternalSerial).HasMaxLength(20).IsRequired();
+            entity.Property(document => document.DocumentType).HasMaxLength(10).IsRequired();
+            entity.Property(document => document.Uuid).HasColumnName("UUID").HasMaxLength(36);
+            entity.Property(document => document.Serial).HasMaxLength(20);
+            entity.Property(document => document.Number).HasMaxLength(20);
+            entity.Property(document => document.Observations).HasColumnType("nvarchar(max)");
+            entity.Property(document => document.Request).HasColumnType("nvarchar(max)");
+            entity.Property(document => document.Response).HasColumnType("nvarchar(max)");
+            entity.Property(document => document.Pdf).HasColumnType("varbinary(max)");
+
+            entity.HasOne(document => document.Company)
+                .WithMany()
+                .HasForeignKey(document => document.CompanyId)
+                .OnDelete(DeleteBehavior.Restrict);
+
+            entity.HasIndex(document => new
+            {
+                document.CompanyId,
+                document.LocationId,
+                document.DocumentType,
+                document.InternalId
+            }).IsUnique();
+
+            entity.HasIndex(document => new { document.Status, document.Id });
         });
     }
 }

@@ -26,7 +26,32 @@ Cada empresa SAE tiene una base de datos independiente. El cliente comparte el s
 
 Este repositorio contiene la solución, el proyecto Worker, configuración Docker y el modelo de configuración/licencia de empresas SAE. La conexión de desarrollo a SQL Server se configura mediante User Secrets y, en Development, el worker aplica migraciones al arrancar. La lógica de documentos, extracción/envío, comandos, heartbeat, sincronización de licencias con la nube y el API todavía están pendientes.
 
-La migración inicial crea `FEL` y el historial de EF. La migración de empresas agrega `SaeCompanies`, con la versión SAE, el número de empresa y el estado local de licencia; no crea todavía tablas de documentos ni stored procedures. Las instalaciones existentes aplican las migraciones pendientes sin recrear la base.
+Las migraciones crean `FEL` si hace falta, mantienen `SaeCompanies` y crean `dbo.Documents` para la cola. Todavía no se incluyen tablas de detalle, stored procedures ni el trigger de SAE.
+
+## Cola local de documentos
+
+El trigger `FEL_EMITIDAS` de cada base SAE debe insertar en `FEL.dbo.Documents` al emitir un documento. Debe proporcionar `CompanyId`, `LocationId`, `InternalNumber`, `InternalSerial`, `InternalId` y `DocumentType`; si omite `Status`, SQL asigna `Pending`. `CompanyId` debe existir en `dbo.SaeCompanies`. Esta migración solo modifica FEL: no instala ni cambia triggers en las bases SAE.
+
+La tabla también tiene un `Id` identity para identificar cada fila. El índice único `(CompanyId, LocationId, DocumentType, InternalId)` evita que el trigger encole dos veces el mismo documento. `LocationId` e `InternalId` son enteros; número y serial interno son texto para conservar su formato. `DocumentType` acepta códigos como `FCAM`, `FACT`, `NCRE` y `NDEB`.
+
+| Columna | Tipo SQL | Uso |
+| --- | --- | --- |
+| `CompanyId` | `int` | FK a `SaeCompanies.Id` |
+| `LocationId` | `int` | Ubicación SAE |
+| `Status` | `nvarchar(20)` | `Pending`, `Processing`, `Signed`, `Delivered`, `Rejected` o `Failed` |
+| `InternalNumber` | `nvarchar(50)` | Número interno del documento SAE |
+| `InternalSerial` | `nvarchar(20)` | Serie interna SAE |
+| `InternalId` | `int` | Identificador interno SAE |
+| `DocumentType` | `nvarchar(10)` | Tipo de comprobante SAE |
+| `UUID` | `nvarchar(36) NULL` | UUID devuelto al firmar |
+| `Serial` | `nvarchar(20) NULL` | Serie SAT |
+| `Number` | `nvarchar(20) NULL` | Número SAT |
+| `Observations` | `nvarchar(max) NULL` | Problemas de envío o motivo de rechazo |
+| `Request` | `nvarchar(max) NULL` | JSON o XML Request enviado |
+| `Response` | `nvarchar(max) NULL` | JSON o XML Response formado/recibido |
+| `Pdf` | `varbinary(max) NULL` | Archivo PDF |
+
+Los datos SAT, `Observations`, `Request`, `Response` y `Pdf` pueden ser nulos al insertar; se guardarán cuando se produzcan durante el procesamiento. Request y Response aceptan JSON o XML como texto, sin validación del formato por SQL Server. El PDF se guarda en binario dentro de FEL. `Processing` está disponible para que una futura implementación reserve el documento durante su envío. El Worker aún no consume esta cola ni llama al API, que sigue pendiente.
 
 ## Empresas SAE y licenciamiento
 
@@ -59,7 +84,7 @@ dotnet user-secrets set "ConnectionStrings:FEL" "<cadena-de-conexion-local>" --p
 
 El servidor local debe aceptar conexiones TCP en el puerto 1433 y el login configurado debe tener permiso para crear la base y aplicar migraciones.
 
-El proyecto de desarrollo aplica las migraciones automáticamente al iniciar en `Development`. La migración de `SaeCompanies` se añade a FEL al iniciar después de actualizar el código.
+El proyecto de desarrollo aplica las migraciones automáticamente al iniciar en `Development`. Las migraciones de empresas y documentos se añaden a FEL al iniciar después de actualizar el código.
 
 Al ejecutar con el perfil Development, el worker llama `Database.MigrateAsync()` durante el arranque. EF Core crea `FEL` si no existe y aplica las migraciones pendientes. También se puede aplicar manualmente:
 

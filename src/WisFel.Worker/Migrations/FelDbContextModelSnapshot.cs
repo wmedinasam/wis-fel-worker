@@ -22,6 +22,83 @@ namespace WisFel.Worker.Migrations
 
             SqlServerModelBuilderExtensions.UseIdentityColumns(modelBuilder);
 
+            modelBuilder.Entity("WisFel.Worker.Data.Document", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint");
+
+                    SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<long>("Id"));
+
+                    b.Property<int>("CompanyId")
+                        .HasColumnType("int");
+
+                    b.Property<string>("DocumentType")
+                        .IsRequired()
+                        .HasMaxLength(10)
+                        .HasColumnType("nvarchar(10)");
+
+                    b.Property<int>("InternalId")
+                        .HasColumnType("int");
+
+                    b.Property<string>("InternalNumber")
+                        .IsRequired()
+                        .HasMaxLength(50)
+                        .HasColumnType("nvarchar(50)");
+
+                    b.Property<string>("InternalSerial")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("nvarchar(20)");
+
+                    b.Property<int>("LocationId")
+                        .HasColumnType("int");
+
+                    b.Property<string>("Number")
+                        .HasMaxLength(20)
+                        .HasColumnType("nvarchar(20)");
+
+                    b.Property<string>("Observations")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<byte[]>("Pdf")
+                        .HasColumnType("varbinary(max)");
+
+                    b.Property<string>("Request")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("Response")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("Serial")
+                        .HasMaxLength(20)
+                        .HasColumnType("nvarchar(20)");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(20)
+                        .HasColumnType("nvarchar(20)")
+                        .HasDefaultValue("Pending");
+
+                    b.Property<string>("Uuid")
+                        .HasMaxLength(36)
+                        .HasColumnType("nvarchar(36)")
+                        .HasColumnName("UUID");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("Status", "Id");
+
+                    b.HasIndex("CompanyId", "LocationId", "DocumentType", "InternalId")
+                        .IsUnique();
+
+                    b.ToTable("Documents", null, t =>
+                        {
+                            t.HasCheckConstraint("CK_Documents_Status", "[Status] IN (N'Pending', N'Processing', N'Signed', N'Delivered', N'Rejected', N'Failed')");
+                        });
+                });
+
             modelBuilder.Entity("WisFel.Worker.Data.SaeCompany", b =>
                 {
                     b.Property<int>("Id")
@@ -58,6 +135,17 @@ namespace WisFel.Worker.Migrations
 
                             t.HasCheckConstraint("CK_SaeCompanies_SaeVersion", "[SaeVersion] >= 4.0 AND [SaeVersion] * 10 = FLOOR([SaeVersion] * 10)");
                         });
+                });
+
+            modelBuilder.Entity("WisFel.Worker.Data.Document", b =>
+                {
+                    b.HasOne("WisFel.Worker.Data.SaeCompany", "Company")
+                        .WithMany()
+                        .HasForeignKey("CompanyId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("Company");
                 });
 #pragma warning restore 612, 618
         }

@@ -65,7 +65,7 @@ public class SaeCompanyTests
     public void SaeConnectionUsesSharedServerAndCredentialsWithCompanyDatabase()
     {
         const string sharedConnectionString =
-            "Server=localhost,1433;Database=FEL;User ID=test-user;Password=test-password;TrustServerCertificate=True";
+            "Server=localhost,1433;Database=FEL;Integrated Security=True;TrustServerCertificate=True";
 
         var company = new SaeCompany(4.6m, 1);
         var result = new SqlConnectionStringBuilder(
@@ -73,8 +73,7 @@ public class SaeCompanyTests
 
         Assert.Equal("localhost,1433", result.DataSource);
         Assert.Equal("SAE46Empre01", result.InitialCatalog);
-        Assert.Equal("test-user", result.UserID);
-        Assert.Equal("test-password", result.Password);
+        Assert.True(result.IntegratedSecurity);
         Assert.True(result.TrustServerCertificate);
     }
 }
