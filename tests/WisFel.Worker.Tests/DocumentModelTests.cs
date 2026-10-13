@@ -1,7 +1,9 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata;
+using System.Text.Json.Nodes;
 using WisFel.Worker.Data;
+using WisFel.Worker.Payloads;
 
 namespace WisFel.Worker.Tests;
 
@@ -83,6 +85,75 @@ public class DocumentModelTests
         Assert.Contains("Delivered", statusConstraint.Sql);
         Assert.Contains("Rejected", statusConstraint.Sql);
         Assert.Contains("Failed", statusConstraint.Sql);
+    }
+
+    [Fact]
+    public void RequestBuilderEmitsRootDocumentWithRequiredNodes()
+    {
+        var json = DocumentRequestJsonBuilder.Serialize(new DocumentRequest());
+        var root = JsonNode.Parse(json)!.AsObject();
+        var document = root["Document"]!.AsObject();
+
+        Assert.Single(root);
+        Assert.NotNull(document["Issuer"]!.AsObject());
+        Assert.NotNull(document["Receiver"]!.AsObject());
+        Assert.Empty(document["Items"]!.AsArray());
+        Assert.Empty(document["FreeFields"]!.AsObject());
+    }
+
+    [Fact]
+    public void RequestBuilderPreservesItemsAndSerializesFreeFieldsAsObject()
+    {
+        var request = new DocumentRequest
+        {
+            Document = new DocumentPayload
+            {
+                Issuer = new JsonObject { ["TaxId"] = "ISSUER-1" },
+                Receiver = new JsonObject { ["TaxId"] = "RECEIVER-1" },
+                Items =
+                [
+                    new JsonObject
+                    {
+                        ["Description"] = "First item",
+                        ["Quantity"] = 2
+                    },
+                    new JsonObject
+                    {
+                        ["Description"] = "Second item",
+                        ["Quantity"] = 1
+                    }
+                ],
+                FreeFields = new SortedDictionary<string, JsonNode?>(StringComparer.Ordinal)
+                {
+                    ["Z-Reference"] = JsonValue.Create("last"),
+                    ["A-Reference"] = JsonValue.Create("first")
+                }
+            }
+        };
+
+        var json = DocumentRequestJsonBuilder.Serialize(request);
+        var document = JsonNode.Parse(json)!["Document"]!.AsObject();
+
+        Assert.Equal(2, document["Items"]!.AsArray().Count);
+        Assert.Equal("ISSUER-1", document["Issuer"]!["TaxId"]!.GetValue<string>());
+        Assert.Equal("RECEIVER-1", document["Receiver"]!["TaxId"]!.GetValue<string>());
+        Assert.Equal("first", document["FreeFields"]!["A-Reference"]!.GetValue<string>());
+        Assert.Equal("last", document["FreeFields"]!["Z-Reference"]!.GetValue<string>());
+        Assert.Equal(json, DocumentRequestJsonBuilder.Serialize(request));
+    }
+
+    [Fact]
+    public void RequestBuilderRejectsNullItems()
+    {
+        var request = new DocumentRequest
+        {
+            Document = new DocumentPayload
+            {
+                Items = [null!]
+            }
+        };
+
+        Assert.Throws<ArgumentException>(() => DocumentRequestJsonBuilder.Serialize(request));
     }
 
     private static FelDbContext CreateContext()

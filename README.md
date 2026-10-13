@@ -53,6 +53,29 @@ La tabla también tiene un `Id` identity para identificar cada fila. El índice 
 
 Los datos SAT, `Observations`, `Request`, `Response` y `Pdf` pueden ser nulos al insertar; se guardarán cuando se produzcan durante el procesamiento. Request y Response aceptan JSON o XML como texto, sin validación del formato por SQL Server. El PDF se guarda en binario dentro de FEL. `Processing` está disponible para que una futura implementación reserve el documento durante su envío. El Worker aún no consume esta cola ni llama al API, que sigue pendiente.
 
+## Borrador del JSON Request
+
+`DocumentRequestJsonBuilder` serializa el DTO provisional en `src/WisFel.Worker/Payloads`. La estructura raíz es `Document`, que contiene los nodos `Issuer`, `Receiver`, el arreglo `Items` y el objeto clave/valor `FreeFields` para adendas:
+
+```json
+{
+  "Document": {
+    "Issuer": {},
+    "Receiver": {},
+    "Items": [],
+    "FreeFields": {}
+  }
+}
+```
+
+Los nodos de emisor/receptor y cada item aceptan objetos JSON flexibles en este borrador porque aún falta acordar los campos y su mapeo desde SAE. Las claves de `FreeFields` se serializan en orden ordinal para mantener una salida estable. El resultado se puede guardar con `Document.StoreRequestJson()` en `Documents.Request`. Todavía no hay lectura de filas `Pending`, extracción SAE ni envío HTTP, así que el constructor recibe datos ya preparados y no define aún el contrato fiscal final.
+
+### Seguridad del payload
+
+El JSON puede incluir datos personales y fiscales. La recomendación para la futura comunicación es HTTPS con TLS 1.2 o superior y autenticación servicio-a-servicio por acordar al diseñar el API. HTTPS protege el tráfico en tránsito, no sustituye autorización del cliente ni controles de acceso, retención y cifrado de backups en el servidor receptor.
+
+No cifrar el JSON manualmente en el worker antes de tener un contrato de claves y rotación: el API necesita poder procesarlo. Si el análisis de amenazas exige cifrado adicional extremo a extremo, API y worker deberán acordar cifrado híbrido con clave pública del receptor, gestión/rotación de claves y tratamiento de errores. No incluir credenciales SQL, contraseñas, llaves privadas ni certificados P12 en el JSON. Redactar Request/Response en logs, trazas y métricas, y restringir el acceso y respaldos de FEL, ya que `Documents.Request` se conserva para auditoría/reintento.
+
 ## Empresas SAE y licenciamiento
 
 Cada empresa se configura en FEL con una versión SAE y un número de empresa del 1 al 99. La base se deriva como `SAE{códigoDeVersión}Empre{número:00}`. La versión mínima es 4.0 y admite un decimal:

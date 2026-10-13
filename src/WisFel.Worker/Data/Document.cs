@@ -1,3 +1,5 @@
+using System.Text.Json;
+
 namespace WisFel.Worker.Data;
 
 public sealed class Document
@@ -37,4 +39,21 @@ public sealed class Document
     public byte[]? Pdf { get; private set; }
 
     public SaeCompany Company { get; private set; } = null!;
+
+    public void StoreRequestJson(string requestJson)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(requestJson);
+
+        using var parsedRequest = JsonDocument.Parse(requestJson);
+        if (parsedRequest.RootElement.ValueKind != JsonValueKind.Object ||
+            !parsedRequest.RootElement.TryGetProperty("Document", out var documentNode) ||
+            documentNode.ValueKind != JsonValueKind.Object)
+        {
+            throw new ArgumentException(
+                "Request JSON must be an object containing the Document node.",
+                nameof(requestJson));
+        }
+
+        Request = requestJson;
+    }
 }
