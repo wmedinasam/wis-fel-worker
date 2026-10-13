@@ -137,6 +137,64 @@ namespace WisFel.Worker.Migrations
                         });
                 });
 
+            modelBuilder.Entity("WisFel.Worker.Data.SaeDocumentQuery", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("int");
+
+                    SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<int>("Id"));
+
+                    b.Property<int>("CompanyId")
+                        .HasColumnType("int");
+
+                    b.Property<string>("DocumentSql")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("DocumentType")
+                        .IsRequired()
+                        .HasMaxLength(10)
+                        .HasColumnType("nvarchar(10)");
+
+                    b.Property<string>("FreeFieldsSql")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<bool>("IsEnabled")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bit")
+                        .HasDefaultValue(true);
+
+                    b.Property<string>("IssuerSql")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("ItemsSql")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("ReceiverSql")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<decimal>("SaeVersion")
+                        .HasPrecision(18, 1)
+                        .HasColumnType("decimal(18,1)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("CompanyId", "SaeVersion", "DocumentType")
+                        .IsUnique();
+
+                    b.ToTable("SaeDocumentQueries", null, t =>
+                        {
+                            t.HasCheckConstraint("CK_SaeDocumentQueries_DocumentType", "LEN([DocumentType]) > 0 AND [DocumentType] = UPPER([DocumentType])");
+
+                            t.HasCheckConstraint("CK_SaeDocumentQueries_SaeVersion", "[SaeVersion] >= 4.0 AND [SaeVersion] * 10 = FLOOR([SaeVersion] * 10)");
+                        });
+                });
+
             modelBuilder.Entity("WisFel.Worker.Data.Document", b =>
                 {
                     b.HasOne("WisFel.Worker.Data.SaeCompany", "Company")
@@ -146,6 +204,15 @@ namespace WisFel.Worker.Migrations
                         .IsRequired();
 
                     b.Navigation("Company");
+                });
+
+            modelBuilder.Entity("WisFel.Worker.Data.SaeDocumentQuery", b =>
+                {
+                    b.HasOne("WisFel.Worker.Data.SaeCompany", null)
+                        .WithMany()
+                        .HasForeignKey("CompanyId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
                 });
 #pragma warning restore 612, 618
         }

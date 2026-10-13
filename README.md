@@ -5,7 +5,7 @@ Worker de escritorio para las instalaciones cliente de WIS FEL. Su objetivo es c
 ## Responsabilidades previstas
 
 - Leer de `Documents` en la base `FEL` los documentos que el trigger `FEL_EMITIDAS` registra con estado `PENDIENTE`.
-- Consultar en la base SAE correspondiente a cada empresa las tablas con sufijo de empresa (por ejemplo, `FACTF01`, `FACTF02`) y reunir cabecera, emisor, receptor, detalle, impuestos y adendas para formar el modelo `documento`.
+- Leer la base SAE correspondiente a cada empresa mediante consultas configurables por empresa, versión de SAE y tipo de documento, y reunir cabecera, emisor, receptor, detalle y adendas para formar un JSON provisional.
 - Enviar documentos al API, aún pendiente de desarrollo, y actualizar en `FEL.Documents` el estado, UUID, serie y número SAT y el motivo de rechazo.
 - Ejecutar comandos remotos autorizados: probar conexión SAE, reprocesar documentos y actualizar clientes SAE. La actualización de clientes solo se permite cuando la empresa tenga habilitada la capacidad `puedeActualizarClientes`.
 - Reportar el latido del worker cada 30 segundos.
@@ -17,16 +17,16 @@ Cada empresa SAE tiene una base de datos independiente. El cliente comparte el s
 
 - **C# y .NET 10**.
 - **Worker Service con Generic Host** para el proceso en segundo plano.
-- **Entity Framework Core 10 y proveedor SQL Server** para FEL y, más adelante, SAE.
+- **Entity Framework Core 10 y proveedor SQL Server** para el esquema de FEL; **Microsoft.Data.SqlClient** para ejecutar las consultas SAE configuradas.
 - **SQL Server** como motor de las bases SAE y FEL.
 - **Docker** para distribuir y ejecutar una imagen Linux en PCs Windows, Linux y macOS sin instalar el runtime .NET 10 en el host.
 - **EF Core migrations** para crear la base `FEL` si todavía no existe y evolucionar su esquema.
 
 ## Estado de este repositorio
 
-Este repositorio contiene la solución, el proyecto Worker, configuración Docker y el modelo de configuración/licencia de empresas SAE. La conexión de desarrollo a SQL Server se configura mediante User Secrets y, en Development, el worker aplica migraciones al arrancar. La lógica de documentos, extracción/envío, comandos, heartbeat, sincronización de licencias con la nube y el API todavía están pendientes.
+Este repositorio contiene la solución, el proyecto Worker, configuración Docker, el modelo de configuración/licencia de empresas SAE y la base reutilizable para consultar SAE y componer un JSON provisional. La conexión de desarrollo a SQL Server se configura mediante User Secrets y, en Development, el worker aplica migraciones al arrancar. El consumo automático de la cola, el envío al API, comandos, heartbeat y sincronización de licencias con la nube todavía están pendientes.
 
-Las migraciones crean `FEL` si hace falta, mantienen `SaeCompanies` y crean `dbo.Documents` para la cola. Todavía no se incluyen tablas de detalle, stored procedures ni el trigger de SAE.
+Las migraciones crean `FEL` si hace falta, mantienen `SaeCompanies`, `SaeDocumentQueries` y `dbo.Documents` para la cola. Todavía no se incluyen tablas de detalle, stored procedures ni el trigger de SAE.
 
 ## Cola local de documentos
 
@@ -68,7 +68,35 @@ Los datos SAT, `Observations`, `Request`, `Response` y `Pdf` pueden ser nulos al
 }
 ```
 
-Los nodos de emisor/receptor y cada item aceptan objetos JSON flexibles en este borrador porque aún falta acordar los campos y su mapeo desde SAE. Las claves de `FreeFields` se serializan en orden ordinal para mantener una salida estable. El resultado se puede guardar con `Document.StoreRequestJson()` en `Documents.Request`. Todavía no hay lectura de filas `Pending`, extracción SAE ni envío HTTP, así que el constructor recibe datos ya preparados y no define aún el contrato fiscal final.
+El nodo `Document` admite además las propiedades dinámicas de cabecera obtenidas desde SAE. El nodo de emisor/receptor y cada item aceptan objetos JSON flexibles porque aún falta acordar los campos y su mapeo. Las claves de `FreeFields` se serializan en orden ordinal para mantener una salida estable; los campos de cabecera no pueden sobrescribir los nodos reservados `Issuer`, `Receiver`, `Items` ni `FreeFields`. El resultado se puede guardar con `Document.StoreRequestJson()` en `Documents.Request`. El lector SAE construye este borrador para un documento individual; todavía no consume automáticamente la cola ni envía HTTP y el contrato fiscal final no está definido.
+
+## Consultas SAE configurables
+
+`dbo.SaeDocumentQueries` conserva una plantilla por empresa, versión de SAE y tipo de documento. La migración crea la tabla, pero no inserta plantillas de ejemplo: antes de usar el lector se deben cargar y ajustar consultas para el esquema real de cada instalación. Así se pueden personalizar columnas y expresiones SQL en FEL sin generar un stored procedure por empresa o modificar el Worker. No se ejecuta DDL ni se modifican las bases SAE.
+
+Cada plantilla contiene cinco consultas editables en SQL Server:
+
+| Columna | Resultado esperado |
+| --- | --- |
+| `DocumentSql` | Una fila y una columna `Json` con objeto JSON; sus propiedades se agregan a `Document`. |
+| `IssuerSql` | Una fila y una columna `Json` con objeto JSON para `Issuer`. |
+| `ReceiverSql` | Una fila y una columna `Json` con objeto JSON para `Receiver`. |
+| `ItemsSql` | Cero o más filas, cada una con una columna `Json` que contiene un objeto JSON de partida. |
+| `FreeFieldsSql` | Cero o más filas con las columnas `Name` y `Value`; `Name` debe ser no nulo, no vacío y único. `Value` puede ser nulo. |
+
+Las cinco consultas reciben estos parámetros SQL tipados, que deben referenciarse como parámetros y no interpolarse como texto:
+
+| Parámetro | Tipo | Origen |
+| --- | --- | --- |
+| `@InternalId` | `int` | Identificador interno SAE del documento |
+| `@InternalNumber` | `nvarchar(50)` | Número interno del documento |
+| `@InternalSerial` | `nvarchar(20)` | Serie interna |
+| `@LocationId` | `int` | Ubicación SAE |
+| `@DocumentType` | `nvarchar(10)` | Código del tipo en mayúsculas |
+
+Las consultas pueden usar `FOR JSON PATH, WITHOUT_ARRAY_WRAPPER` para producir los objetos esperados y conservar la libertad de seleccionar, concatenar o transformar campos. Los nombres reales de tablas y columnas dependen de la versión y personalización SAE; a modo orientativo, facturas pueden leer `FACTF{suffix}`, partidas `PAR_FACTF{suffix}`, campos libres `FACF_CLIB{suffix}` e inventario `INVE{suffix}`. Notas de crédito pueden utilizar `FACTD{suffix}` y `PAR_FACTD{suffix}`. Estos ejemplos no constituyen una plantilla lista para producción ni cubren todos los tipos documentales.
+
+El lector solo permite documentos `Pending`, exige que la empresa pertenezca al documento y que la política de licencia permita el envío. No cambia el estado ni llama `SaveChanges`; el componente que lo invoque debe persistir los cambios cuando corresponda. Las consultas configuradas son SQL ejecutable y el Worker no analiza su texto para impedir comandos de escritura. Por ello, la cuenta SQL que el Worker usa para conectarse a las bases SAE debe tener permisos de solo lectura; limita también quién puede modificar `SaeDocumentQueries`. El lector abre conexiones a SAE para ejecutar las secciones; no hay todavía consumo continuo de la cola ni administración de plantillas desde una UI.
 
 ### Seguridad del payload
 
@@ -95,7 +123,7 @@ INSERT INTO dbo.SaeCompanies (SaeVersion, CompanyNumber)
 VALUES (4.6, 1);
 ```
 
-La nube será la autoridad de licenciamiento. FEL conserva por empresa el indicador recibido y la fecha de actualización. Hasta que se implemente la sincronización con el API, las empresas nuevas quedan sin licencia y la política `IDocumentSendPolicy` deniega el envío si la empresa no está configurada o no tiene licencia. No habilites manualmente `IsLicensed`. El futuro flujo de documentos deberá reflejar la denegación por falta de licencia como rechazo local; aún no se marca `Documents` porque esa tabla y sus estados no forman parte del modelo actual.
+La nube será la autoridad de licenciamiento. FEL conserva por empresa el indicador recibido y la fecha de actualización. Hasta que se implemente la sincronización con el API, las empresas nuevas quedan sin licencia y la política `IDocumentSendPolicy` deniega la lectura para envío si la empresa no está configurada o no tiene licencia. No habilites manualmente `IsLicensed`. Aún no existe una transición que cambie el estado de `Documents` al denegarse por licencia.
 
 ## Desarrollo local con SQL Server
 

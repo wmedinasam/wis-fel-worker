@@ -6,6 +6,8 @@ public sealed class FelDbContext(DbContextOptions<FelDbContext> options) : DbCon
 {
     public DbSet<SaeCompany> SaeCompanies => Set<SaeCompany>();
 
+    public DbSet<SaeDocumentQuery> SaeDocumentQueries => Set<SaeDocumentQuery>();
+
     public DbSet<Document> Documents => Set<Document>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
@@ -29,6 +31,35 @@ public sealed class FelDbContext(DbContextOptions<FelDbContext> options) : DbCon
             entity.Property(company => company.SaeVersion).HasPrecision(18, 1);
             entity.Property(company => company.IsLicensed).HasDefaultValue(false);
             entity.HasIndex(company => new { company.SaeVersion, company.CompanyNumber }).IsUnique();
+        });
+
+        modelBuilder.Entity<SaeDocumentQuery>(entity =>
+        {
+            entity.ToTable("SaeDocumentQueries", table =>
+            {
+                table.HasCheckConstraint(
+                    "CK_SaeDocumentQueries_SaeVersion",
+                    "[SaeVersion] >= 4.0 AND [SaeVersion] * 10 = FLOOR([SaeVersion] * 10)");
+                table.HasCheckConstraint(
+                    "CK_SaeDocumentQueries_DocumentType",
+                    "LEN([DocumentType]) > 0 AND [DocumentType] = UPPER([DocumentType])");
+            });
+
+            entity.HasKey(query => query.Id);
+            entity.Property(query => query.SaeVersion).HasPrecision(18, 1);
+            entity.Property(query => query.DocumentType).HasMaxLength(10).IsRequired();
+            entity.Property(query => query.DocumentSql).HasColumnType("nvarchar(max)").IsRequired();
+            entity.Property(query => query.IssuerSql).HasColumnType("nvarchar(max)").IsRequired();
+            entity.Property(query => query.ReceiverSql).HasColumnType("nvarchar(max)").IsRequired();
+            entity.Property(query => query.ItemsSql).HasColumnType("nvarchar(max)").IsRequired();
+            entity.Property(query => query.FreeFieldsSql).HasColumnType("nvarchar(max)").IsRequired();
+            entity.Property(query => query.IsEnabled).HasDefaultValue(true);
+            entity.HasOne<SaeCompany>()
+                .WithMany()
+                .HasForeignKey(query => query.CompanyId)
+                .OnDelete(DeleteBehavior.Cascade);
+            entity.HasIndex(query => new { query.CompanyId, query.SaeVersion, query.DocumentType })
+                .IsUnique();
         });
 
         modelBuilder.Entity<Document>(entity =>

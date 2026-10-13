@@ -156,6 +156,46 @@ public class DocumentModelTests
         Assert.Throws<ArgumentException>(() => DocumentRequestJsonBuilder.Serialize(request));
     }
 
+    [Fact]
+    public void RequestBuilderIncludesDynamicDocumentFieldsAlongsideNestedNodes()
+    {
+        var request = new DocumentRequest
+        {
+            Document = new DocumentPayload
+            {
+                Fields = new JsonObject
+                {
+                    ["InternalNumber"] = "F-101",
+                    ["Total"] = 123.45m
+                }
+            }
+        };
+
+        var document = JsonNode.Parse(DocumentRequestJsonBuilder.Serialize(request))!["Document"]!;
+
+        Assert.Equal("F-101", document["InternalNumber"]!.GetValue<string>());
+        Assert.Equal(123.45m, document["Total"]!.GetValue<decimal>());
+        Assert.NotNull(document["Issuer"]);
+        Assert.NotNull(document["Receiver"]);
+    }
+
+    [Fact]
+    public void RequestBuilderDoesNotAllowDynamicFieldsToReplaceReservedSections()
+    {
+        var request = new DocumentRequest
+        {
+            Document = new DocumentPayload
+            {
+                Fields = new JsonObject
+                {
+                    ["items"] = new JsonArray()
+                }
+            }
+        };
+
+        Assert.Throws<ArgumentException>(() => DocumentRequestJsonBuilder.Serialize(request));
+    }
+
     private static FelDbContext CreateContext()
     {
         var options = new DbContextOptionsBuilder<FelDbContext>()

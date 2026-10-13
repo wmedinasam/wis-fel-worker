@@ -11,6 +11,9 @@ public sealed class DocumentRequest
 
 public sealed class DocumentPayload
 {
+    [JsonIgnore]
+    public JsonObject Fields { get; init; } = new();
+
     [JsonPropertyName("Issuer")]
     public JsonObject Issuer { get; init; } = new();
 
