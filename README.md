@@ -197,9 +197,74 @@ Los comandos llegan únicamente en el latido, con lease de 30 segundos y un máx
 
 ## Certificadores y países
 
-La lógica de certificación vive completa en el worker: un provider por certificador y país, seleccionado por el certificador asignado a la empresa, su país, el formato que exige (JSON o XML) y el endpoint del ambiente correspondiente (pruebas o producción). El API nunca llama al certificador ni almacena su respuesta firmada.
+La lógica de certificación vive completa en el worker: un provider por certificador y país. El API nunca llama al certificador ni almacena su respuesta firmada.
 
-Falta la pieza de configuración: el API todavía **no expone** un endpoint para que el agente descargue su asignación de certificador ni las credenciales cifradas de la empresa. Hasta que ese contrato exista no hay fuente de configuración de certificador, el worker no certifica y no se deben crear tablas, catálogos locales ni plantillas de certificador por adelantado. Las credenciales de certificador y los certificados P12 no se persisten en FEL, en el repositorio, en la imagen ni en los logs.
+### De dónde sale la configuración
+
+`AgentLicenseSynchronizer` pide `GET /agent/certifier-configuration` para cada empresa cuya licencia permite enviar (`Active` o `Grace`) y guarda la respuesta en `CertifierConfigurationCache`. Es solo memoria: las credenciales nunca se escriben en FEL, en el repositorio, en la imagen ni en los logs, y un reinicio las vuelve a pedir. Si la licencia deja de permitir envío, o la empresa no tiene asignación de certificador, la entrada se borra.
+
+### El cascarón
+
+Está en `src/WisFel.Worker/Certifiers/`:
+
+| Tipo | Rol |
+| --- | --- |
+| `CertifierKey(CertifierCode, CountryCode)` | Clave de selección. Se normaliza (recorta espacios, mayúsculas), así que `" infile "` y `"INFILE"` son la misma clave. |
+| `ICertifierProvider` | Un certificador en un país. Expone su `Key` y `CertifyAsync(CertificationRequest)`. |
+| `CertificationRequest` | El JSON de la petición ya construido desde SAE, más la `AgentCertifierConfigurationResponse` de la empresa. |
+| `CertificationResult` | Resultado: `Certified(...)` o `Failed(...)`. Lleva los campos que el worker ya reporta al API y las columnas de `dbo.Documents`. |
+| `ICertifierProviderFactory` / `CertifierProviderFactory` | Recibe todos los providers registrados e indexa por `Key`. `Resolve(key)` devuelve el provider o lanza un error que lista los registrados. |
+
+Dos providers con la misma clave hacen fallar la construcción del factory, al arrancar, y no al procesar un documento.
+
+Hoy **no hay ningún provider registrado**, así que resolver una clave lanza `InvalidOperationException` indicando que no hay ninguno. Es el estado esperado hasta el primer certificador real.
+
+### Cómo agregar un certificador o país
+
+1. Crea la clase en `src/WisFel.Worker/Certifiers/<Certificador>/`, implementando `ICertifierProvider`. Un provider por combinación certificador + país, porque el formato y el ambiente cambian por país. Ejemplo para INFILE en Guatemala:
+
+   ```csharp
+   using WisFel.Worker.Certifiers;
+
+   namespace WisFel.Worker.Certifiers.Infile;
+
+   public sealed class InfileGtProvider : ICertifierProvider
+   {
+       public CertifierKey Key { get; } = new("INFILE", "GT");
+
+       public Task<CertificationResult> CertifyAsync(
+           CertificationRequest request,
+           CancellationToken cancellationToken = default)
+       {
+           var configuration = request.Configuration;
+
+           // configuration.EndpointUrl     -> URL del ambiente que corresponde
+           // configuration.UseProduction   -> pruebas o producción
+           // configuration.RequestFormat   -> CertifierRequestFormat.Json o Xml
+           // configuration.Credentials     -> llaves del certificador; no se loguean ni se persisten
+           //
+           // La llamada HTTP, la firma y el parseo de la respuesta van aquí cuando exista su contrato.
+           throw new NotImplementedException("El contrato de INFILE GT aún no está definido.");
+       }
+   }
+   ```
+
+2. Regístralo en `Program.cs`, junto a los demás singletons de certificación. Es una sola línea y la clave no se repite en ningún otro sitio:
+
+   ```csharp
+   builder.Services.AddSingleton<ICertifierProvider, InfileGtProvider>();
+   ```
+
+3. Agrega una prueba del provider con un `HttpMessageHandler` de prueba, siguiendo `FelApiClientTests`. Comprueba que `CertifierProviderFactory.Resolve` devuelve tu clase para la clave.
+
+Para un certificador nuevo en un país que ya existe, basta el paso 1 con otra clave. Para un país nuevo del mismo certificador, si el formato es igual, el provider puede compartir código con otro mediante una clase base o un método estático, siempre dentro de su carpeta.
+
+### Qué queda fuera, a propósito
+
+- **Sin transiciones de estado.** `DocumentQueueProcessor` no llama a los providers todavía: `Status` no se toca hasta tener el contrato de respuesta del certificador. Cuando se cablee, el llamador traduce `CertificationResult` a estado y lo reporta.
+- **Sin modelo fiscal canónico.** El provider recibe el JSON de SAE ya construido. El contrato fiscal final no está acordado.
+- **Sin tablas ni plantillas de certificador por adelantado.** Las credenciales y las configuraciones vienen del API.
+- **Sin credenciales en logs ni en la base.** Un provider no debe loguear `Configuration.Credentials` ni el `RequestJson` completo.
 
 ## Borrador del JSON Request
 

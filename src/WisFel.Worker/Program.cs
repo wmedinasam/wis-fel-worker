@@ -3,6 +3,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using WisFel.Worker;
 using WisFel.Worker.Api;
+using WisFel.Worker.Certifiers;
 using WisFel.Worker.Data;
 using WisFel.Worker.Queue;
 using WisFel.Worker.Sae;
@@ -47,6 +48,7 @@ if (OperatingSystem.IsWindows())
 builder.Services.AddSingleton<IAgentCredentialStore, ProtectedAgentCredentialStore>();
 builder.Services.AddSingleton<IFelApiClient, FelApiClient>();
 builder.Services.AddSingleton<CertifierConfigurationCache>();
+builder.Services.AddSingleton<ICertifierProviderFactory, CertifierProviderFactory>();
 builder.Services.AddScoped<IAgentLicenseSynchronizer, AgentLicenseSynchronizer>();
 
 builder.Services.AddOptions<WorkerOptions>().Bind(builder.Configuration.GetSection("Worker"));
