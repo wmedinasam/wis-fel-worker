@@ -19,6 +19,7 @@ public sealed class FelApiClient(
     private const string RefreshEndpoint = "agent/token/refresh";
     private const string HeartbeatEndpoint = "agent/heartbeat";
     private const string DocumentStatusEndpoint = "agent/documents/status";
+    private const string CertifierConfigurationEndpoint = "agent/certifier-configuration";
 
     private static readonly JsonSerializerOptions SerializerOptions = new(JsonSerializerDefaults.Web);
 
@@ -70,6 +71,7 @@ public sealed class FelApiClient(
         };
 
         return SendAuthenticatedAsync<AgentHeartbeatRequest, AgentHeartbeatResponse>(
+            HttpMethod.Post,
             HeartbeatEndpoint,
             companyKey,
             request,
@@ -93,11 +95,22 @@ public sealed class FelApiClient(
         }
 
         return SendAuthenticatedAsync<DocumentStatusBatchRequest, DocumentStatusBatchResponse>(
+            HttpMethod.Post,
             DocumentStatusEndpoint,
             companyKey,
             new DocumentStatusBatchRequest { Documents = documents },
             cancellationToken);
     }
+
+    public Task<AgentCertifierConfigurationResponse> GetCertifierConfigurationAsync(
+        string companyKey,
+        CancellationToken cancellationToken = default) =>
+        SendAuthenticatedAsync<object, AgentCertifierConfigurationResponse>(
+            HttpMethod.Get,
+            CertifierConfigurationEndpoint,
+            companyKey,
+            request: null,
+            cancellationToken);
 
     private AgentSession GetSession(string companyKey)
     {
@@ -114,6 +127,7 @@ public sealed class FelApiClient(
     {
         var credentials = credentialStore.GetCredentials(companyKey);
         var response = await SendAsync<AgentHandshakeRequest, AgentTokenResponse>(
+            HttpMethod.Post,
             HandshakeEndpoint,
             companyKey,
             new AgentHandshakeRequest
@@ -141,6 +155,7 @@ public sealed class FelApiClient(
         try
         {
             var response = await SendAsync<AgentRefreshRequest, AgentTokenResponse>(
+                HttpMethod.Post,
                 RefreshEndpoint,
                 companyKey,
                 new AgentRefreshRequest { RefreshToken = session.RefreshToken },
@@ -161,9 +176,10 @@ public sealed class FelApiClient(
     }
 
     private async Task<TResponse> SendAuthenticatedAsync<TRequest, TResponse>(
+        HttpMethod method,
         string endpoint,
         string companyKey,
-        TRequest request,
+        TRequest? request,
         CancellationToken cancellationToken)
     {
         var session = GetSession(companyKey);
@@ -172,6 +188,7 @@ public sealed class FelApiClient(
         try
         {
             return await SendAsync<TRequest, TResponse>(
+                method,
                 endpoint,
                 companyKey,
                 request,
@@ -188,6 +205,7 @@ public sealed class FelApiClient(
 
             // One retry only: a second 401 with a fresh token is a real failure.
             return await SendAsync<TRequest, TResponse>(
+                method,
                 endpoint,
                 companyKey,
                 request,
@@ -249,9 +267,10 @@ public sealed class FelApiClient(
     }
 
     private async Task<TResponse> SendAsync<TRequest, TResponse>(
+        HttpMethod method,
         string endpoint,
         string companyKey,
-        TRequest request,
+        TRequest? request,
         string? accessToken,
         CancellationToken cancellationToken)
     {
@@ -265,9 +284,9 @@ public sealed class FelApiClient(
 
             try
             {
-                using var message = new HttpRequestMessage(HttpMethod.Post, endpoint)
+                using var message = new HttpRequestMessage(method, endpoint)
                 {
-                    Content = JsonContent.Create(request, options: SerializerOptions)
+                    Content = request is null ? null : JsonContent.Create(request, options: SerializerOptions)
                 };
 
                 if (accessToken is not null)

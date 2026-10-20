@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Http.Headers;
+using System.Text.Json;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using WisFel.Worker.Api;
@@ -29,7 +30,7 @@ public class FelApiClientTests
             {
               "id": "44444444-4444-4444-4444-444444444444",
               "type": "ResendDocument",
-              "payload": { "documentId": "55555555-5555-5555-5555-555555555555", "idempotencyKey": "1-2-FACT-7" },
+              "payload": "{\"documentId\":\"55555555-5555-5555-5555-555555555555\",\"idempotencyKey\":\"1-2-FACT-7\"}",
               "leaseExpiresAtUtc": "2026-10-20T10:00:35Z"
             }
           ]
@@ -73,7 +74,7 @@ public class FelApiClientTests
         Assert.Equal("ResendDocument", command.Type);
         Assert.Equal(
             "55555555-5555-5555-5555-555555555555",
-            command.Payload!["documentId"]!.GetValue<string>());
+            JsonDocument.Parse(command.Payload!).RootElement.GetProperty("documentId").GetString());
         Assert.Equal(3, handler.Requests.Count);
         Assert.Equal("/agent/handshake", handler.Requests[0].Path);
         Assert.Equal("/agent/heartbeat", handler.Requests[1].Path);
@@ -116,6 +117,46 @@ public class FelApiClientTests
 
         Assert.Equal(HttpStatusCode.Unauthorized, exception.StatusCode);
         Assert.Equal(4, handler.Requests.Count);
+    }
+
+    [Fact]
+    public async Task CertifierConfigurationIsFetchedWithGetAndTheAgentToken()
+    {
+        var handler = new StubHttpMessageHandler();
+        handler.Enqueue(HttpStatusCode.OK, HandshakeJson);
+        handler.Enqueue(HttpStatusCode.OK, """
+            {
+              "certifierCode": "INFILE",
+              "countryCode": "GT",
+              "endpointUrl": "https://certifier.example/gt",
+              "requestFormat": 1,
+              "useProduction": true,
+              "credentials": { "usuario": "worker-gt" }
+            }
+            """);
+        var client = CreateClient(handler);
+
+        var configuration = await client.GetCertifierConfigurationAsync(CompanyKey);
+
+        var request = handler.Requests[1];
+        Assert.Equal(HttpMethod.Get, request.Method);
+        Assert.Equal("/agent/certifier-configuration", request.Path);
+        Assert.Equal("access-1", request.AccessToken);
+        Assert.Empty(request.Body);
+        Assert.Equal(CertifierRequestFormat.Xml, configuration.RequestFormat);
+        Assert.Equal("worker-gt", configuration.Credentials["usuario"]);
+    }
+
+    [Fact]
+    public async Task CertifierConfigurationForbiddenMeansInvalidLicense()
+    {
+        var handler = new StubHttpMessageHandler();
+        handler.Enqueue(HttpStatusCode.OK, HandshakeJson);
+        handler.Enqueue(HttpStatusCode.Forbidden, "{}");
+        var client = CreateClient(handler);
+
+        await Assert.ThrowsAsync<FelApiLicenseException>(
+            () => client.GetCertifierConfigurationAsync(CompanyKey));
     }
 
     [Fact]
@@ -367,7 +408,7 @@ public class FelApiClientTests
             NullLogger<FelApiClient>.Instance);
     }
 
-    private sealed record RecordedRequest(string Path, string? AccessToken, string Body);
+    private sealed record RecordedRequest(string Path, string? AccessToken, string Body, HttpMethod Method);
 
     private sealed class StubHttpClientFactory(HttpMessageHandler handler, Uri baseAddress) : IHttpClientFactory
     {
@@ -407,7 +448,8 @@ public class FelApiClientTests
                 request.Headers.Authorization?.Parameter,
                 request.Content is null
                     ? string.Empty
-                    : await request.Content.ReadAsStringAsync(cancellationToken)));
+                    : await request.Content.ReadAsStringAsync(cancellationToken),
+                request.Method));
 
             Assert.True(responses.Count > 0, $"No stub response left for {request.RequestUri}.");
             return responses.Dequeue();

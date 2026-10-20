@@ -109,6 +109,8 @@ public sealed class FelDbContext(DbContextOptions<FelDbContext> options) : DbCon
             entity.Property(document => document.Request).HasColumnType("nvarchar(max)");
             entity.Property(document => document.Response).HasColumnType("nvarchar(max)");
             entity.Property(document => document.Pdf).HasColumnType("varbinary(max)");
+            entity.Property(document => document.IssuedAtUtc)
+                .HasDefaultValueSql("SYSUTCDATETIME()");
 
             entity.HasOne(document => document.Company)
                 .WithMany()

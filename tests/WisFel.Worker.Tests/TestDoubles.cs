@@ -82,11 +82,23 @@ internal sealed class FakeFelApiClient : IFelApiClient
 
     public DocumentStatusBatchResponse ReportResponse { get; set; } = new();
 
+    public Func<string, AgentCertifierConfigurationResponse> OnCertifierConfiguration { get; set; } = _ => new();
+
+    public List<string> CertifierConfigurationRequests { get; } = [];
+
     public Task<FelApiSession> HandshakeAsync(string companyKey, CancellationToken cancellationToken = default) =>
         Task.FromResult(OnSession(companyKey));
 
     public Task<FelApiSession> RefreshAsync(string companyKey, CancellationToken cancellationToken = default) =>
         Task.FromResult(OnSession(companyKey));
+
+    public Task<AgentCertifierConfigurationResponse> GetCertifierConfigurationAsync(
+        string companyKey,
+        CancellationToken cancellationToken = default)
+    {
+        CertifierConfigurationRequests.Add(companyKey);
+        return Task.FromResult(OnCertifierConfiguration(companyKey));
+    }
 
     public Task<AgentHeartbeatResponse> HeartbeatAsync(
         string companyKey,

@@ -1,4 +1,3 @@
-using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
 
 namespace WisFel.Worker.Api;
@@ -81,8 +80,9 @@ public sealed class PendingAgentCommand
     [JsonPropertyName("type")]
     public string Type { get; init; } = string.Empty;
 
+    // The API stores the payload as JSON text and sends it as a string, so it is parsed where it is used.
     [JsonPropertyName("payload")]
-    public JsonObject? Payload { get; init; }
+    public string? Payload { get; init; }
 
     [JsonPropertyName("leaseExpiresAtUtc")]
     public DateTimeOffset LeaseExpiresAtUtc { get; init; }
@@ -126,6 +126,35 @@ public sealed class DocumentStatusReport
 
     [JsonPropertyName("certifiedAtUtc")]
     public DateTimeOffset? CertifiedAtUtc { get; init; }
+}
+
+/// <summary>Certifier configuration of the company. Credentials are served in clear over TLS and kept in memory only.</summary>
+public sealed class AgentCertifierConfigurationResponse
+{
+    [JsonPropertyName("certifierCode")]
+    public string CertifierCode { get; init; } = string.Empty;
+
+    [JsonPropertyName("countryCode")]
+    public string CountryCode { get; init; } = string.Empty;
+
+    [JsonPropertyName("endpointUrl")]
+    public string EndpointUrl { get; init; } = string.Empty;
+
+    [JsonPropertyName("requestFormat")]
+    public CertifierRequestFormat RequestFormat { get; init; }
+
+    [JsonPropertyName("useProduction")]
+    public bool UseProduction { get; init; }
+
+    [JsonPropertyName("credentials")]
+    public IReadOnlyDictionary<string, string> Credentials { get; init; } = new Dictionary<string, string>();
+}
+
+/// <summary>Mirrors the API enum, which travels as its integer value: Json = 0, Xml = 1.</summary>
+public enum CertifierRequestFormat
+{
+    Json,
+    Xml
 }
 
 public sealed class DocumentStatusBatchResponse

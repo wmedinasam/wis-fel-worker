@@ -27,9 +27,9 @@ Cada empresa SAE tiene una base de datos independiente. El cliente comparte el s
 
 ## Estado de este repositorio
 
-Este repositorio contiene la solución, el proyecto Worker, configuración Docker, el modelo de configuración/licencia de empresas SAE, la base reutilizable para consultar SAE y componer un JSON provisional, el cliente HTTP del API (handshake, refresh, latido y reporte de estados) y el almacén seguro de credenciales y tokens del agente. La conexión de desarrollo a SQL Server se configura mediante User Secrets y, en Development, el worker aplica migraciones al arrancar.
+Este repositorio contiene la solución, el proyecto Worker, configuración Docker, el modelo de configuración/licencia de empresas SAE, la base reutilizable para consultar SAE y componer un JSON provisional, el cliente HTTP del API (handshake, refresh, latido, reporte de estados y configuración del certificador) y el almacén seguro de credenciales y tokens del agente. La conexión de desarrollo a SQL Server se configura mediante User Secrets y, en Development, el worker aplica migraciones al arrancar.
 
-Pendientes: la certificación y los providers por certificador y país, que esperan el contrato de configuración del certificador en el API, y la atención del comando `ResendDocument`, que depende de poder consultar al certificador. El bucle ya corre: sincroniza licencia, consume la cola y late.
+Pendientes: la certificación y los providers por certificador y país, que ya reciben la configuración del certificador (`GET /agent/certifier-configuration`, cacheada solo en memoria), y la atención del comando `ResendDocument`, que depende de poder consultar al certificador. El bucle ya corre: sincroniza licencia, consume la cola y late.
 
 Las migraciones crean `FEL` si hace falta, mantienen `SaeCompanies`, `SaeCommonQueries`, `SaeDocumentQueries` y `dbo.Documents` para la cola. Todavía no se incluyen tablas de detalle, stored procedures ni el trigger de SAE.
 
@@ -111,8 +111,9 @@ Resiliencia: `FelApiRetry.NextDelay` aplica backoff exponencial con jitter, resp
 | `POST /agent/token/refresh` | Rotación del token de agente | 20/min por IP | tokens nuevos y revalidación de licencia |
 | `POST /agent/heartbeat` | Latido cada 30 s con `workerVersion` y `acknowledgedCommandIds` | 120/min por agente | `serverTimeUtc` y `pendingCommands` |
 | `POST /agent/documents/status` | Reporte de estados en lote | 60/min por agente | `{accepted, rejected[]}` |
+| `GET /agent/certifier-configuration` | Configuración del certificador de la empresa, con credenciales | por agente | certificador, país, endpoint, formato, ambiente y credenciales |
 
-No existen otros endpoints para el worker: no inventes rutas de configuración, catálogo ni CRUD.
+Son cinco endpoints en total: no inventes rutas de catálogo ni CRUD.
 
 Manejo de respuestas: el access token dura 15 minutos y el refresh de agente 30 días; ante 401 se refresca y se reintenta una vez. Un 403 significa licencia inválida, no credenciales malas. Cada refresh revoca el anterior y reusar uno ya rotado revoca toda la familia, así que el refresh token vigente debe guardarse en un solo lugar y nunca duplicarse entre procesos ni aparecer en logs.
 
@@ -184,7 +185,7 @@ Los nombres de estado del API no coinciden con los de la cola local. El enum loc
 | `Rejected` | `Error` |
 | `Failed` | `Error`, o `Retrying` si aún quedan reintentos |
 
-`DocumentStatusReportMapper` deriva la clave y traduce el estado; el tipo `DocumentStatusReport` no tiene campos donde quepan `Request`, `Response` ni `Pdf`. La cola local todavía no guarda `attemptCount`, `issuedAtUtc`, `certifiedAtUtc` ni `errorCode`, así que el llamador los pasa al mapper y se envían nulos cuando no hay dato.
+`DocumentStatusReportMapper` deriva la clave y traduce el estado; el tipo `DocumentStatusReport` no tiene campos donde quepan `Request`, `Response` ni `Pdf`. La cola local todavía no guarda `attemptCount`, `certifiedAtUtc` ni `errorCode`, así que el llamador los pasa al mapper y se envían nulos cuando no hay dato. `issuedAtUtc` sí existe en la cola (`dbo.Documents.IssuedAtUtc`), pero es la fecha de entrada en la cola, no la fecha fiscal del documento, que aún no llega de SAE.
 
 Se envían metadatos: `documentType`, `series`, `number` (los datos SAT), `authorizationNumber` con el UUID del certificador, `errorCode` y `errorMessage` derivados del resultado, `attemptCount`, `issuedAtUtc` y `certifiedAtUtc`. **Nunca** se envían `Request`, `Response` ni `Pdf`: el documento firmado no sale del worker y el API solo guarda metadatos, así que los mensajes de error no deben arrastrar el payload.
 
@@ -192,7 +193,7 @@ Se envían metadatos: `documentType`, `series`, `number` (los datos SAT), `autho
 
 ### Comandos
 
-Los comandos llegan únicamente en el latido, con lease de 30 segundos y un máximo de 20 por respuesta, y se confirman enviando su id en `acknowledgedCommandIds` en el siguiente latido. El cliente los entrega sin interpretarlos: `PendingAgentCommand.Payload` es un `JsonObject` tal como llegó. El único comando definido es `ResendDocument`, con `payload` `{"documentId":"…","idempotencyKey":"…"}`: el worker localiza el documento por `idempotencyKey`, **consulta primero al certificador si ya se certificó** para no duplicar, reenvía si corresponde y reporta el estado resultante.
+Los comandos llegan únicamente en el latido, con lease de 30 segundos y un máximo de 20 por respuesta, y se confirman enviando su id en `acknowledgedCommandIds` en el siguiente latido. El cliente los entrega sin interpretarlos: `PendingAgentCommand.Payload` es el string JSON tal como llegó; quien atienda el comando lo parsea. El único comando definido es `ResendDocument`, con `payload` (string JSON) `{"documentId":"…","idempotencyKey":"…"}`: el worker localiza el documento por `idempotencyKey`, **consulta primero al certificador si ya se certificó** para no duplicar, reenvía si corresponde y reporta el estado resultante.
 
 ## Certificadores y países
 

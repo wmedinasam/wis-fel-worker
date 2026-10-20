@@ -61,7 +61,7 @@ public sealed class DocumentQueueProcessor(
                 catch (Exception exception) when (exception is not OperationCanceledException)
                 {
                     // shortcut: a document whose SAE read keeps failing is retried on every pass and never
-                    // marked Failed; add a retry cut-off once the queue has an attempt or timestamp column.
+                    // marked Failed; add an attempt counter and a retry cut-off once the queue has one.
                     // The message is logged without the query text or the payload.
                     logger.LogWarning(
                         "Document {IdempotencyKey} could not be read from SAE: {Reason}",
@@ -88,7 +88,9 @@ public sealed class DocumentQueueProcessor(
         IReadOnlyList<Document> documents,
         CancellationToken cancellationToken)
     {
-        var reports = documents.Select(document => DocumentStatusReportMapper.Create(document)).ToArray();
+        var reports = documents
+            .Select(document => DocumentStatusReportMapper.Create(document, issuedAtUtc: document.IssuedAtUtc))
+            .ToArray();
 
         try
         {

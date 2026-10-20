@@ -46,6 +46,7 @@ if (OperatingSystem.IsWindows())
 
 builder.Services.AddSingleton<IAgentCredentialStore, ProtectedAgentCredentialStore>();
 builder.Services.AddSingleton<IFelApiClient, FelApiClient>();
+builder.Services.AddSingleton<CertifierConfigurationCache>();
 builder.Services.AddScoped<IAgentLicenseSynchronizer, AgentLicenseSynchronizer>();
 
 builder.Services.AddOptions<WorkerOptions>().Bind(builder.Configuration.GetSection("Worker"));

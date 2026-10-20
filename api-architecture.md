@@ -1,5 +1,7 @@
 # FEL API: Plataforma de Firma Electrónica
 
+> Espejo de [`wis-fel-api/README.md`](../wis-fel-api/README.md). Si cambia el contrato, se actualizan ambos en el mismo cambio.
+
 API multi-tenant para la plataforma de facturación electrónica (FEL). Gestiona el licenciamiento, los planes, los clientes (tenants), las empresas, las sucursales y los **agentes** (workers locales).
 
 **La API no se comunica con los certificadores.** Los workers, que viven en otro repositorio, certifican los documentos y reportan aquí solo su estado. Desde la API se consulta ese estado y se ordena un reenvío manual, que ejecuta el worker.
@@ -58,13 +60,14 @@ wis-fel-api/                      Raíz del repositorio
     ├── fel-api/                  Web API (namespace fel_api)
     │   ├── Program.cs            DI, autenticación, rate limiting, pipeline y modo bootstrap
     │   ├── Controllers/          AuthController, AgentController, PlatformAgentsController,
+    │   │                         PlatformCertifierCredentialsController,
     │   │                         PlatformDocumentsController, TenantDocumentsController
     │   ├── Auth/                 Emisión de JWT, opciones JWT, hashing de tokens
     │   ├── RateLimiting/         Opciones de rate limiting
     │   ├── Services/
     │   │   ├── Auth/             Login, refresh tokens, perfil cliente, bootstrap admin
     │   │   ├── Agents/           Provisionamiento, handshake, heartbeat, licencia
-    │   │   ├── Catalog/          Resolución de configuración de certificador por empresa
+    │   │   ├── Catalog/          Configuración de certificador por empresa y cifrado de credenciales
     │   │   ├── Documents/        Estado reportado por el worker, consulta y reenvío
     │   │   └── Subscriptions/    Validación de cuotas del plan
     │   ├── Domain/               Entidades y reglas (Agents, Audit, Catalog, Documents,
@@ -137,11 +140,11 @@ Los datos se aíslan por tenant en la capa de aplicación, usando las columnas `
   - `RefreshToken` guarda solo el hash del token, con `FamilyId` y `ReplacedByTokenHash`.
 - **Catálogo de certificadores**: es configuración que consume el worker. La API no llama a estos endpoints.
   - `Certifier` (por ejemplo `INFILE`) y `CertifierCountryConfiguration` (país, `EndpointUrl` HTTPS, formato Json o Xml).
-  - `CompanyCertifierAssignment`: una asignación por empresa, con credenciales cifradas y `UseProduction`.
+  - `CompanyCertifierAssignment`: una asignación por empresa, con `CredentialsEncrypted` y `UseProduction`. Las credenciales se cifran con ASP.NET Core Data Protection (`CertifierCredentialProtector`) antes de guardarse y solo se descifran al servirlas al worker por TLS.
 - **Documentos** (`Document`): guarda **solo metadatos** reportados por el worker. El XML o JSON firmado nunca sale del worker.
   - Campos: `IdempotencyKey` (única por tenant), `DocumentType`, `Series`, `Number`, `Status`, `AuthorizationNumber` (UUID del certificador), `ErrorCode`, `ErrorMessage`, `AttemptCount`, `IssuedAtUtc`, `CertifiedAtUtc`, `LastReportedAtUtc` y `ResendRequestedAtUtc`. También los ids de agente, empresa y sucursal.
   - Estados (`DocumentStatus`, iguales al outbox del worker): `Pending`, `Processing`, `Certified`, `Error`, `Retrying`.
-- **AuditLog**: modelado, pero nadie escribe en él todavía.
+- **AuditLog**: solo se escribe al actualizar credenciales de certificador (`certifier-credentials-updated`). El resto de eventos todavía no se auditan.
 
 ---
 
@@ -184,7 +187,7 @@ Los usuarios de tenant usan el token del IdP, que no trae tenant. Por eso el `te
 
 ### Rate limiting
 
-Ventanas fijas, cola 0, respuesta 429 con `Retry-After`. Particiones por IP (login y refresh de plataforma, handshake y refresh de agente), por `sub` (`/auth/me` y documentos de tenant), por `agent_id` (heartbeat y estado de documentos) y por admin (gestión de agentes y documentos de plataforma).
+Ventanas fijas, cola 0, respuesta 429 con `Retry-After`. Particiones por IP (login y refresh de plataforma, handshake y refresh de agente), por `sub` (`/auth/me` y documentos de tenant), por `agent_id` (heartbeat, estado de documentos y configuración del certificador) y por admin (gestión de agentes y documentos de plataforma).
 
 ---
 
@@ -320,6 +323,22 @@ curl -X POST http://localhost:5070/platform/agents/<agentId>/revoke \
 
 Responde 204, o 404 si no existe. Marca el agente como inactivo y revoca todos sus refresh tokens.
 
+### Credenciales del certificador (plataforma): `/platform/companies/{companyId}/certifier-credentials`
+
+Requiere política `PlatformAdministrator` y usa el rate limit `PlatformAgentManagement`. La empresa debe tener ya una `CompanyCertifierAssignment`.
+
+```bash
+curl -X PUT http://localhost:5070/platform/companies/<companyId>/certifier-credentials \
+  -H "Authorization: Bearer <accessToken>" \
+  -H "Content-Type: application/json" \
+  -d '{"credentials":{"usuario":"worker-gt","llaveApi":"..."},"useProduction":true}'
+```
+
+- `credentials` es un diccionario libre de 1 a 20 entradas (clave de 1 a 100 caracteres, valor de hasta 4000). Las llaves las define el provider del worker para ese certificador.
+- Se guarda cifrado en `CredentialsEncrypted` y se registra un `AuditLog` con el admin y la IP. Las credenciales nunca se escriben en el log.
+- Responde 204, 404 si la empresa no tiene asignación de certificador, 400 si una entrada no cumple los límites.
+- No existe un GET: las credenciales solo se devuelven al worker.
+
 ### Agente (worker): `/agent`
 
 **Handshake** (anónimo, `agent-handshake`, 10 por minuto por IP):
@@ -340,6 +359,8 @@ curl -X POST http://localhost:5070/agent/token/refresh \
   -d '{"refreshToken":"<refreshToken>"}'
 ```
 
+Respuesta 200 con `accessToken`, `refreshToken` y `licenseState`, el estado de licencia que el worker sincroniza en cada refresh. 401 si el refresh token no es válido o el agente está revocado, 403 si la licencia no es válida.
+
 **Heartbeat** (`Agent`, `agent-heartbeat`):
 
 ```bash
@@ -351,7 +372,31 @@ curl -X POST http://localhost:5070/agent/heartbeat \
 
 Respuesta 200: `{serverTimeUtc, pendingCommands:[{id, type, payload, leaseExpiresAtUtc}]}`.
 
-Un comando `ResendDocument` llega con `payload` igual a `{"documentId":"<guid>","idempotencyKey":"..."}`. El worker hace ack del comando enviando su id en `acknowledgedCommandIds` en el siguiente heartbeat.
+Un comando `ResendDocument` llega con `payload` como string JSON: `"{\"documentId\":\"<guid>\",\"idempotencyKey\":\"...\"}"`. El worker hace ack del comando enviando su id en `acknowledgedCommandIds` en el siguiente heartbeat.
+
+**Configuración del certificador** (`Agent`, `agent-configuration`):
+
+```bash
+curl http://localhost:5070/agent/certifier-configuration \
+  -H "Authorization: Bearer <accessToken-agente>"
+```
+
+El `tenantId` y el `companyId` salen del token, nunca del request. Respuesta 200:
+
+```json
+{
+  "certifierCode": "INFILE",
+  "countryCode": "GT",
+  "endpointUrl": "https://certificador.gt.test/api",
+  "requestFormat": 1,
+  "useProduction": true,
+  "credentials": { "usuario": "worker-gt", "llaveApi": "..." }
+}
+```
+
+- `requestFormat` es el enum `CertifierRequestFormat` (`0` = Json, `1` = Xml).
+- `credentials` llega en claro sobre TLS y viene vacío si aún no se han cargado. El worker las guarda cifradas en local.
+- Errores: 401 si el agente está revocado (su access token sigue vigente hasta caducar, por eso se revisa en cada llamada), 403 si la licencia no es válida, 404 si la empresa no existe, 409 si no tiene asignación de certificador o está inactiva, 500 si las credenciales no se pueden descifrar (key ring de Data Protection perdido).
 
 **Reportar estado de documentos** (`Agent`, `agent-document-status`):
 
@@ -447,6 +492,7 @@ curl -X POST http://localhost:5070/tenant/<tenantId>/documents/<documentId>/rese
 | `ClientJwt` | `RequireHttpsMetadata` | `true` |
 | `AgentHeartbeat` | `CommandLeaseSeconds` | `30` |
 | `AgentHeartbeat` | `MaxCommandsPerHeartbeat` | `20` |
+| `DataProtection` | `KeyRingPath` | vacío (obligatorio fuera de `Development`) |
 | `RateLimiting` | cada política: `PermitLimit`, `WindowSeconds` | ver tabla abajo |
 | `AllowedHosts` | | `*` |
 
@@ -461,6 +507,7 @@ Políticas de rate limiting (`PermitLimit` / `WindowSeconds`):
 | `ClientMe` | 60 / 60 s |
 | `AgentHeartbeat` | 120 / 60 s |
 | `AgentDocumentStatus` | 60 / 60 s |
+| `AgentConfiguration` | 60 / 60 s |
 | `PlatformAgentManagement` | 30 / 60 s |
 | `PlatformDocuments` | 60 / 60 s |
 | `TenantDocuments` | 60 / 60 s |
@@ -472,6 +519,7 @@ Políticas de rate limiting (`PermitLimit` / `WindowSeconds`):
 | `ConnectionStrings:FelApi` | Sí | Cadena de conexión a SQL Server |
 | `Jwt:SigningKey` | Sí | Base64 de al menos 32 bytes |
 | `ClientJwt:Authority` / `Audience` | Para `/auth/me` y `/tenant/*` | URL del IdP y audiencia |
+| `DataProtection:KeyRingPath` | Fuera de `Development` | Carpeta persistente del key ring. Sin ella no se pueden descifrar las credenciales de certificador tras un reinicio; respáldala y restringe sus permisos |
 
 ### Pipeline HTTP
 
@@ -509,15 +557,15 @@ Los tests usan EF Core InMemory, así que no necesitan SQL Server.
 - Una clave de prueba y un límite de login de 2 por minuto.
 - Una clave simétrica local para `ClientJwt`, que reemplaza al IdP externo y permite probar los endpoints de tenant.
 
-Cobertura actual (20 tests):
+Cobertura actual (25 tests):
 
-- `AgentApiTests` (7): login solo para administradores, `/auth/me`, rate limit de login, handshake y heartbeat con comando, rotación de refresh tokens y rechazo de reuso, provisionamiento y revocación.
+- `AgentApiTests` (11): login solo para administradores, `/auth/me`, rate limit de login, handshake y heartbeat con comando, rotación de refresh tokens y rechazo de reuso, provisionamiento y revocación, carga de credenciales de certificador y entrega al worker (comprobando que en la base están cifradas), 409 cuando la empresa no tiene asignación, `licenseState` como texto en handshake y refresh, y 401 para un agente revocado con token todavía vigente.
 - `DocumentApiTests` (3):
   - Upsert del estado y rechazo de una sucursal ajena.
   - Filtro por estado y reenvío desde plataforma, con el comando entregado en el heartbeat y 409 para `Certified` y para un reenvío duplicado.
   - Alcance de tenant por membresía y por empresas de los roles.
 - `DevelopmentSeedTests` (1): el seed es idempotente y los GET de plataforma y tenant devuelven los datos.
-- `SubscriptionStateCalculatorTests` (3), `TenantQuotaValidatorTests` (4), `CertifierConfigurationResolverTests` (1), `ClientProfileServiceTests` (1).
+- `SubscriptionStateCalculatorTests` (3), `TenantQuotaValidatorTests` (4), `CertifierConfigurationResolverTests` (2), `ClientProfileServiceTests` (1).
 
 ---
 
@@ -525,8 +573,9 @@ Cobertura actual (20 tests):
 
 - No hay endpoints CRUD para tenants, empresas, sucursales, planes, suscripciones, certificadores, usuarios ni códigos de activación. Esos datos se cargan directamente en la base.
 - La certificación, los providers por país y certificador, y los reintentos automáticos viven en el repositorio del worker. Esta API no tiene `HttpClient` hacia certificadores.
-- Todavía no existe un endpoint para que el worker descargue la configuración del certificador de su empresa. `CertifierConfigurationResolver` está listo para usarse en ese endpoint.
-- `AuditLog` y `ActivationCode` están modelados, pero no se usan. Los reenvíos todavía no se auditan.
+- El key ring de Data Protection se guarda en disco sin cifrar (`DataProtection:KeyRingPath`). No hay Azure Key Vault ni cifrado con certificado, ni rotación de credenciales de certificador.
+- Al cambiar las credenciales no se encola ningún comando para que el worker recargue su configuración: las toma en su siguiente pull.
+- `ActivationCode` está modelado, pero no se usa. `AuditLog` solo registra cambios de credenciales de certificador; los reenvíos todavía no se auditan.
 - La migración `WorkerOwnedCertification` **borra** los documentos existentes. Se reemplazó el modelo de payload y envíos por el de solo metadatos, y además se eliminó la tabla `DocumentDeliveryAttempts`.
 - Sin Dockerfile, sin docker-compose y sin CI.
 - `AGENTS.md` describe PostgreSQL, RS256 y ASP.NET Identity como parte del diseño. La implementación actual usa SQL Server y HS256 con un hasher propio.

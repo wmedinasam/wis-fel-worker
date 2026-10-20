@@ -93,14 +93,72 @@ public class AgentLicenseSynchronizerTests
         Assert.False((await LoadCompanyAsync(databaseName)).IsLicensed);
     }
 
+    [Fact]
+    public async Task AnActiveLicenseCachesTheCertifierConfiguration()
+    {
+        var databaseName = await SeedAsync(initiallyLicensed: false);
+        var client = new FakeFelApiClient
+        {
+            OnSession = _ => new FelApiSession(null, null, "Active", null),
+            OnCertifierConfiguration = _ => new AgentCertifierConfigurationResponse { CertifierCode = "INFILE" }
+        };
+        var cache = new CertifierConfigurationCache();
+
+        await CreateSynchronizer(databaseName, client, certifierConfigurations: cache).SynchronizeAsync();
+
+        Assert.True(cache.TryGet("1", out var configuration));
+        Assert.Equal("INFILE", configuration.CertifierCode);
+        Assert.Equal(["1"], client.CertifierConfigurationRequests);
+    }
+
+    [Fact]
+    public async Task ASuspendedLicenseDropsTheCachedCredentialsWithoutFetchingThem()
+    {
+        var databaseName = await SeedAsync(initiallyLicensed: true);
+        var client = new FakeFelApiClient
+        {
+            OnSession = _ => new FelApiSession(null, null, "Suspended", null)
+        };
+        var cache = new CertifierConfigurationCache();
+        cache.Store("1", new AgentCertifierConfigurationResponse { CertifierCode = "INFILE" });
+
+        await CreateSynchronizer(databaseName, client, certifierConfigurations: cache).SynchronizeAsync();
+
+        Assert.False(cache.TryGet("1", out _));
+        Assert.Empty(client.CertifierConfigurationRequests);
+    }
+
+    [Fact]
+    public async Task AMissingCertifierAssignmentDoesNotBreakTheLicenseSync()
+    {
+        var databaseName = await SeedAsync(initiallyLicensed: false);
+        var client = new FakeFelApiClient
+        {
+            OnSession = _ => new FelApiSession(null, null, "Active", null),
+            OnCertifierConfiguration = _ => throw new FelApiException(
+                "agent/certifier-configuration",
+                "1",
+                HttpStatusCode.Conflict,
+                "no certifier assignment")
+        };
+        var cache = new CertifierConfigurationCache();
+
+        await CreateSynchronizer(databaseName, client, certifierConfigurations: cache).SynchronizeAsync();
+
+        Assert.True((await LoadCompanyAsync(databaseName)).IsLicensed);
+        Assert.False(cache.TryGet("1", out _));
+    }
+
     private static AgentLicenseSynchronizer CreateSynchronizer(
         string databaseName,
         IFelApiClient client,
-        IAgentCredentialStore? credentialStore = null) =>
+        IAgentCredentialStore? credentialStore = null,
+        CertifierConfigurationCache? certifierConfigurations = null) =>
         new(
             CreateContext(databaseName),
             client,
             credentialStore ?? new FakeAgentCredentialStore(),
+            certifierConfigurations ?? new CertifierConfigurationCache(),
             NullLogger<AgentLicenseSynchronizer>.Instance);
 
     private static async Task<string> SeedAsync(bool initiallyLicensed)

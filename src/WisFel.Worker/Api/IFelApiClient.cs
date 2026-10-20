@@ -1,7 +1,7 @@
 namespace WisFel.Worker.Api;
 
 /// <summary>
-/// The four agent endpoints the FEL API exposes. <paramref name="companyKey"/> is the key under
+/// The agent endpoints the FEL API exposes. <paramref name="companyKey"/> is the key under
 /// FelApi:Agents, that is the FEL SaeCompanies.Id of the company whose agent credential is used.
 /// </summary>
 public interface IFelApiClient
@@ -18,5 +18,9 @@ public interface IFelApiClient
     Task<DocumentStatusBatchResponse> ReportDocumentStatusAsync(
         string companyKey,
         IReadOnlyList<DocumentStatusReport> documents,
+        CancellationToken cancellationToken = default);
+
+    Task<AgentCertifierConfigurationResponse> GetCertifierConfigurationAsync(
+        string companyKey,
         CancellationToken cancellationToken = default);
 }

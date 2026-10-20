@@ -16,6 +16,9 @@ public sealed class Document
 
     public DocumentStatus Status { get; private set; }
 
+    /// <summary>When the row entered the queue; the database fills it, the worker never writes it.</summary>
+    public DateTimeOffset IssuedAtUtc { get; private set; }
+
     public string InternalNumber { get; private set; } = string.Empty;
 
     public string InternalSerial { get; private set; } = string.Empty;

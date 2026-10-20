@@ -8,6 +8,7 @@ public sealed class AgentLicenseSynchronizer(
     FelDbContext felDbContext,
     IFelApiClient felApiClient,
     IAgentCredentialStore credentialStore,
+    CertifierConfigurationCache certifierConfigurations,
     ILogger<AgentLicenseSynchronizer> logger) : IAgentLicenseSynchronizer
 {
     /// <summary>Deny by default: only the states the API documents as valid allow sending.</summary>
@@ -40,17 +41,26 @@ public sealed class AgentLicenseSynchronizer(
                     continue;
                 }
 
-                company.ApplyLicenseStatusFromCloud(
-                    AllowsSending(session.LicenseState),
-                    DateTimeOffset.UtcNow);
+                var allowsSending = AllowsSending(session.LicenseState);
+                company.ApplyLicenseStatusFromCloud(allowsSending, DateTimeOffset.UtcNow);
                 logger.LogInformation(
                     "Company {CompanyKey} reports license state {LicenseState}.",
                     companyKey,
                     session.LicenseState);
+
+                if (allowsSending)
+                {
+                    await CacheCertifierConfigurationAsync(companyKey, cancellationToken);
+                }
+                else
+                {
+                    certifierConfigurations.Remove(companyKey);
+                }
             }
             catch (FelApiLicenseException)
             {
                 company.ApplyLicenseStatusFromCloud(false, DateTimeOffset.UtcNow);
+                certifierConfigurations.Remove(companyKey);
                 logger.LogWarning("The API denied the license of company {CompanyKey}.", companyKey);
             }
             catch (FelApiException exception)
@@ -64,5 +74,24 @@ public sealed class AgentLicenseSynchronizer(
         }
 
         await felDbContext.SaveChangesAsync(cancellationToken);
+    }
+
+    private async Task CacheCertifierConfigurationAsync(string companyKey, CancellationToken cancellationToken)
+    {
+        try
+        {
+            certifierConfigurations.Store(
+                companyKey,
+                await felApiClient.GetCertifierConfigurationAsync(companyKey, cancellationToken));
+        }
+        catch (FelApiException exception) when (exception is not FelApiLicenseException)
+        {
+            // A company without a certifier assignment (404/409) is not a license failure: the next pass retries.
+            certifierConfigurations.Remove(companyKey);
+            logger.LogWarning(
+                "The certifier configuration of company {CompanyKey} could not be fetched ({StatusCode}).",
+                companyKey,
+                exception.StatusCode);
+        }
     }
 }
