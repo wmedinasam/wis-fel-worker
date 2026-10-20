@@ -1,14 +1,17 @@
 # WIS FEL Worker
 
-Worker de escritorio para las instalaciones cliente de WIS FEL. Su objetivo es conectar con SQL Server, detectar documentos emitidos por Aspel SAE a través de la cola local de FEL, enviarlos al API de certificación cuando esté disponible y reflejar el resultado en la base local.
+Worker de escritorio para las instalaciones cliente de WIS FEL. Su objetivo es conectar con SQL Server, detectar documentos emitidos por Aspel SAE a través de la cola local de FEL, certificarlos y reflejar el resultado en la base local.
+
+El worker es el **agente** de la plataforma FEL: concentra la lógica de todos los certificadores y todos los países, y es el único componente que habla con ellos. El API de la nube no se comunica con certificadores: gestiona licenciamiento, planes, tenants, empresas, sucursales y agentes, recibe **solo metadatos** del resultado y ordena reenvíos. El contrato que este worker consume está en [`api-architecture.md`](api-architecture.md).
 
 ## Responsabilidades previstas
 
 - Leer de `Documents` en la base `FEL` los documentos que el trigger `FEL_EMITIDAS` registra con estado `PENDIENTE`.
 - Leer la base SAE correspondiente a cada empresa mediante consultas configurables por empresa, versión de SAE y tipo de documento, y reunir cabecera, emisor, receptor, detalle y adendas para formar un JSON provisional.
-- Enviar documentos al API, aún pendiente de desarrollo, y actualizar en `FEL.Documents` el estado, UUID, serie y número SAT y el motivo de rechazo.
-- Ejecutar comandos remotos autorizados: probar conexión SAE, reprocesar documentos y actualizar clientes SAE. La actualización de clientes solo se permite cuando la empresa tenga habilitada la capacidad `puedeActualizarClientes`.
-- Reportar el latido del worker cada 30 segundos.
+- Certificar cada documento con el certificador que corresponda a la empresa y a su país, y actualizar en `FEL.Documents` el estado, UUID, serie y número SAT y el motivo de rechazo.
+- Reportar al API el estado de los documentos (solo metadatos) y mantener sincronizado el estado de licencia de cada empresa.
+- Ejecutar los comandos que el API entrega en el latido. El contrato define hoy un único comando, `ResendDocument`; probar conexión SAE, reprocesar documentos y actualizar clientes SAE siguen siendo operaciones locales sin comando en el API. La actualización de clientes solo se permite cuando la empresa tenga habilitada la capacidad `puedeActualizarClientes`.
+- Reportar el latido cada 30 segundos con la versión del worker y confirmar los comandos ya atendidos.
 - Conservar XML y PDF en la tabla `Documents` cuando esa opción esté configurada.
 
 Cada empresa SAE tiene una base de datos independiente. El cliente comparte el servidor SQL y las credenciales entre FEL y todas las empresas SAE; el worker solo debe atender empresas configuradas para esa instalación. No debe escribir en SAE salvo al ejecutar el comando autorizado de actualización de clientes.
@@ -24,7 +27,9 @@ Cada empresa SAE tiene una base de datos independiente. El cliente comparte el s
 
 ## Estado de este repositorio
 
-Este repositorio contiene la solución, el proyecto Worker, configuración Docker, el modelo de configuración/licencia de empresas SAE y la base reutilizable para consultar SAE y componer un JSON provisional. La conexión de desarrollo a SQL Server se configura mediante User Secrets y, en Development, el worker aplica migraciones al arrancar. El consumo automático de la cola, el envío al API, comandos, heartbeat y sincronización de licencias con la nube todavía están pendientes.
+Este repositorio contiene la solución, el proyecto Worker, configuración Docker, el modelo de configuración/licencia de empresas SAE y la base reutilizable para consultar SAE y componer un JSON provisional. La conexión de desarrollo a SQL Server se configura mediante User Secrets y, en Development, el worker aplica migraciones al arrancar.
+
+Pendientes, ya con contrato de API definido en [`api-architecture.md`](api-architecture.md): el consumo automático de la cola, el cliente HTTP del API (handshake, refresh, latido y reporte de estados), los providers por certificador y país, y la sincronización del estado de licencia.
 
 Las migraciones crean `FEL` si hace falta, mantienen `SaeCompanies`, `SaeCommonQueries`, `SaeDocumentQueries` y `dbo.Documents` para la cola. Todavía no se incluyen tablas de detalle, stored procedures ni el trigger de SAE.
 
@@ -51,7 +56,66 @@ La tabla también tiene un `Id` identity para identificar cada fila. El índice 
 | `Response` | `nvarchar(max) NULL` | JSON o XML Response formado/recibido |
 | `Pdf` | `varbinary(max) NULL` | Archivo PDF |
 
-Los datos SAT, `Observations`, `Request`, `Response` y `Pdf` pueden ser nulos al insertar; se guardarán cuando se produzcan durante el procesamiento. Request y Response aceptan JSON o XML como texto, sin validación del formato por SQL Server. El PDF se guarda en binario dentro de FEL. `Processing` está disponible para que una futura implementación reserve el documento durante su envío. El Worker aún no consume esta cola ni llama al API, que sigue pendiente.
+Los datos SAT, `Observations`, `Request`, `Response` y `Pdf` pueden ser nulos al insertar; se guardarán cuando se produzcan durante el procesamiento. Request y Response aceptan JSON o XML como texto, sin validación del formato por SQL Server. El PDF se guarda en binario dentro de FEL. `Processing` está disponible para que una futura implementación reserve el documento durante su envío. El Worker aún no consume esta cola ni llama al API.
+
+## Integración con el API FEL (nube)
+
+El worker consume el API como agente autenticado. La cola local es la fuente de verdad del trabajo pendiente y el API es la autoridad de licenciamiento y el destino de los metadatos.
+
+### Transporte
+
+El API expone HTTPS/REST con JWT; **no ofrece sockets ni WebSocket**, y los comandos se entregan en la respuesta del latido. Por eso el worker no abre sockets crudos: usa un `HttpClient` tipado por `IHttpClientFactory`, con `PooledConnectionLifetime` y keep-alive para reutilizar la conexión TLS entre latidos en lugar de renegociarla cada 30 segundos. Si más adelante el API publica un canal persistente (WebSocket o SignalR), el cliente se puede sustituir sin tocar la cola ni los providers; no lo implementes antes de que exista ese contrato.
+
+Resiliencia esperada: reintentos con backoff exponencial y jitter, respetar `Retry-After` en las respuestas 429, y seguir encolando en `dbo.Documents` mientras no haya red. Perder el API no debe detener la captura de documentos.
+
+### Endpoints que consume
+
+| Endpoint | Uso | Límite | Devuelve |
+| --- | --- | --- | --- |
+| `POST /agent/handshake` | Autenticación inicial con `agentId`, `secret` y `workerVersion` | 10/min por IP | tokens, `licenseState`, `tenantId`, `companyId` |
+| `POST /agent/token/refresh` | Rotación del token de agente | 20/min por IP | tokens nuevos y revalidación de licencia |
+| `POST /agent/heartbeat` | Latido cada 30 s con `workerVersion` y `acknowledgedCommandIds` | 120/min por agente | `serverTimeUtc` y `pendingCommands` |
+| `POST /agent/documents/status` | Reporte de estados en lote | 60/min por agente | `{accepted, rejected[]}` |
+
+No existen otros endpoints para el worker: no inventes rutas de configuración, catálogo ni CRUD.
+
+Manejo de respuestas: el access token dura 15 minutos y el refresh de agente 30 días; ante 401 se refresca y se reintenta una vez. Un 403 significa licencia inválida, no credenciales malas. Cada refresh revoca el anterior y reusar uno ya rotado revoca toda la familia, así que el refresh token vigente debe guardarse en un solo lugar y nunca duplicarse entre procesos ni aparecer en logs.
+
+### Credenciales del agente
+
+Hay **una credencial de agente por empresa SAE**: cada fila de `dbo.SaeCompanies` se asocia a un `agentId` y a los GUID de tenant y empresa del API, de modo que la licencia y los documentos queden separados por empresa igual que en la plataforma. El secreto se muestra una sola vez al crear el agente y vive en User Secrets o variables de entorno, junto a la cadena de conexión; no se versiona, no va en Compose y no se registra en logs.
+
+### Reporte de estados
+
+El lote admite de 1 a 100 documentos y el API hace upsert por `IdempotencyKey`, única por tenant. El worker la deriva de la clave natural de la cola, la misma del índice único que evita duplicados del trigger:
+
+```
+{CompanyId}-{LocationId}-{DocumentType}-{InternalId}
+```
+
+Los nombres de estado del API no coinciden con los de la cola local. El enum local se conserva y la traducción ocurre solo en el borde del cliente HTTP:
+
+| `DocumentStatus` local | `status` en el API |
+| --- | --- |
+| `Pending` | `Pending` |
+| `Processing` | `Processing` |
+| `Signed`, `Delivered` | `Certified` |
+| `Rejected` | `Error` |
+| `Failed` | `Error`, o `Retrying` si aún quedan reintentos |
+
+Se envían metadatos: `documentType`, `series`, `number` (los datos SAT), `authorizationNumber` con el UUID del certificador, `errorCode` y `errorMessage` derivados del resultado, `attemptCount`, `issuedAtUtc` y `certifiedAtUtc`. **Nunca** se envían `Request`, `Response` ni `Pdf`: el documento firmado no sale del worker y el API solo guarda metadatos, así que los mensajes de error no deben arrastrar el payload.
+
+`branchId` es opcional y es el GUID de una sucursal del API; la cola solo tiene `LocationId` como entero y todavía no hay mapeo acordado, por lo que se envía `null`. Un `branchId` que no pertenezca a la empresa del agente hace que el API rechace ese documento en `rejected[]`.
+
+### Comandos
+
+Los comandos llegan únicamente en el latido, con lease de 30 segundos y un máximo de 20 por respuesta, y se confirman enviando su id en `acknowledgedCommandIds` en el siguiente latido. El único comando definido es `ResendDocument`, con `payload` `{"documentId":"…","idempotencyKey":"…"}`: el worker localiza el documento por `idempotencyKey`, **consulta primero al certificador si ya se certificó** para no duplicar, reenvía si corresponde y reporta el estado resultante.
+
+## Certificadores y países
+
+La lógica de certificación vive completa en el worker: un provider por certificador y país, seleccionado por el certificador asignado a la empresa, su país, el formato que exige (JSON o XML) y el endpoint del ambiente correspondiente (pruebas o producción). El API nunca llama al certificador ni almacena su respuesta firmada.
+
+Falta la pieza de configuración: el API todavía **no expone** un endpoint para que el agente descargue su asignación de certificador ni las credenciales cifradas de la empresa. Hasta que ese contrato exista no hay fuente de configuración de certificador, el worker no certifica y no se deben crear tablas, catálogos locales ni plantillas de certificador por adelantado. Las credenciales de certificador y los certificados P12 no se persisten en FEL, en el repositorio, en la imagen ni en los logs.
 
 ## Borrador del JSON Request
 
@@ -117,9 +181,9 @@ El lector solo permite documentos `Pending`, exige que la empresa pertenezca al 
 
 ### Seguridad del payload
 
-El JSON puede incluir datos personales y fiscales. La recomendación para la futura comunicación es HTTPS con TLS 1.2 o superior y autenticación servicio-a-servicio por acordar al diseñar el API. HTTPS protege el tráfico en tránsito, no sustituye autorización del cliente ni controles de acceso, retención y cifrado de backups en el servidor receptor.
+El JSON puede incluir datos personales y fiscales. Su destino es el certificador, no el API de la nube: al API solo viajan metadatos. La comunicación es HTTPS con TLS 1.2 o superior; hacia el API la autenticación ya está definida (JWT de agente obtenido en el handshake) y hacia el certificador se usarán las credenciales de la empresa, cuya entrega sigue pendiente. HTTPS protege el tráfico en tránsito, no sustituye autorización del cliente ni controles de acceso, retención y cifrado de backups en el servidor receptor.
 
-No cifrar el JSON manualmente en el worker antes de tener un contrato de claves y rotación: el API necesita poder procesarlo. Si el análisis de amenazas exige cifrado adicional extremo a extremo, API y worker deberán acordar cifrado híbrido con clave pública del receptor, gestión/rotación de claves y tratamiento de errores. No incluir credenciales SQL, contraseñas, llaves privadas ni certificados P12 en el JSON. Redactar Request/Response en logs, trazas y métricas, y restringir el acceso y respaldos de FEL, ya que `Documents.Request` se conserva para auditoría/reintento.
+No cifrar el JSON manualmente en el worker antes de tener un contrato de claves y rotación: el receptor necesita poder procesarlo. Si el análisis de amenazas exige cifrado adicional extremo a extremo, API y worker deberán acordar cifrado híbrido con clave pública del receptor, gestión/rotación de claves y tratamiento de errores. No incluir credenciales SQL, contraseñas, llaves privadas ni certificados P12 en el JSON. Redactar Request/Response en logs, trazas y métricas, y restringir el acceso y respaldos de FEL, ya que `Documents.Request` se conserva para auditoría/reintento.
 
 ## Empresas SAE y licenciamiento
 
@@ -140,7 +204,17 @@ INSERT INTO dbo.SaeCompanies (SaeVersion, CompanyNumber)
 VALUES (4.6, 1);
 ```
 
-La nube será la autoridad de licenciamiento. FEL conserva por empresa el indicador recibido y la fecha de actualización. Hasta que se implemente la sincronización con el API, las empresas nuevas quedan sin licencia y la política `IDocumentSendPolicy` deniega la lectura para envío si la empresa no está configurada o no tiene licencia. No habilites manualmente `IsLicensed`. Aún no existe una transición que cambie el estado de `Documents` al denegarse por licencia.
+El API es la autoridad de licenciamiento. El handshake y cada refresh devuelven `licenseState` con uno de tres valores, calculados por el API a partir del plan del tenant y sus días de gracia:
+
+| `licenseState` | Efecto en el worker |
+| --- | --- |
+| `Active` | Permite certificar y enviar |
+| `Grace` | Permite certificar y enviar; la suscripción está por expirar |
+| `Suspended` | Deniega el envío |
+
+Ese valor se aplica con `SaeCompany.ApplyLicenseStatusFromCloud(...)`, que persiste el indicador y la fecha de actualización, y es lo que luego evalúa `IDocumentSendPolicy`. El worker no calcula expiraciones ni períodos de gracia por su cuenta.
+
+Hasta que se implemente la sincronización, las empresas nuevas quedan sin licencia y la política deniega la lectura para envío si la empresa no está configurada o no tiene licencia. No habilites manualmente `IsLicensed`. Aún no existe una transición que cambie el estado de `Documents` al denegarse por licencia.
 
 ## Desarrollo local con SQL Server
 
