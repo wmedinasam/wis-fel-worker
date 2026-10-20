@@ -12,8 +12,15 @@ public sealed class FelApiOptions
 
     public TimeSpan RetryBaseDelay { get; set; } = TimeSpan.FromSeconds(1);
 
+    /// <summary>Root of the agent token store. In the container it must point at a mounted volume.</summary>
+    public string TokenStorePath { get; set; } = DefaultTokenStorePath;
+
     /// <summary>Agent credentials keyed by the FEL SaeCompanies.Id of the company they belong to.</summary>
     public Dictionary<string, FelApiAgentCredentials> Agents { get; set; } = [];
+
+    public static string DefaultTokenStorePath { get; } = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "wis-fel-worker");
 
     public bool IsValid(out string error)
     {
@@ -33,6 +40,12 @@ public sealed class FelApiOptions
         if (string.IsNullOrWhiteSpace(WorkerVersion))
         {
             error = "FelApi:WorkerVersion is required.";
+            return false;
+        }
+
+        if (string.IsNullOrWhiteSpace(TokenStorePath))
+        {
+            error = "FelApi:TokenStorePath is required.";
             return false;
         }
 

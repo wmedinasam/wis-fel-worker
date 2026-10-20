@@ -9,6 +9,7 @@ namespace WisFel.Worker.Api;
 
 public sealed class FelApiClient(
     IHttpClientFactory httpClientFactory,
+    IAgentCredentialStore credentialStore,
     IOptions<FelApiOptions> options,
     ILogger<FelApiClient> logger) : IFelApiClient
 {
@@ -100,15 +101,10 @@ public sealed class FelApiClient(
 
     private AgentSession GetSession(string companyKey)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(companyKey);
+        // Throws when the company has no configured credential, before any session is created.
+        credentialStore.GetCredentials(companyKey);
 
-        if (!options.Value.Agents.ContainsKey(companyKey))
-        {
-            throw new InvalidOperationException(
-                $"No agent credential is configured under FelApi:Agents:{companyKey}.");
-        }
-
-        return sessions.GetOrAdd(companyKey, _ => new AgentSession());
+        return sessions.GetOrAdd(companyKey, key => new AgentSession(key, credentialStore));
     }
 
     private async Task<FelApiSession> HandshakeCoreAsync(
@@ -116,7 +112,7 @@ public sealed class FelApiClient(
         AgentSession session,
         CancellationToken cancellationToken)
     {
-        var credentials = options.Value.Agents[companyKey];
+        var credentials = credentialStore.GetCredentials(companyKey);
         var response = await SendAsync<AgentHandshakeRequest, AgentTokenResponse>(
             HandshakeEndpoint,
             companyKey,
@@ -218,7 +214,9 @@ public sealed class FelApiClient(
                 return stored;
             }
 
-            await HandshakeCoreAsync(companyKey, session, cancellationToken);
+            // After a restart there is a persisted refresh token but no access token; RefreshCoreAsync
+            // handshakes by itself when there is nothing to refresh.
+            await RefreshCoreAsync(companyKey, session, cancellationToken);
             return session.AccessToken!;
         }
         finally
@@ -350,18 +348,23 @@ public sealed class FelApiClient(
     /// Per-company tokens. The refresh token stays in memory only: FEL must never store it and reusing a
     /// rotated one revokes the whole family, so a restart simply handshakes again with the agent secret.
     /// </summary>
-    private sealed class AgentSession
+    private sealed class AgentSession(string companyKey, IAgentCredentialStore credentialStore)
     {
         public SemaphoreSlim Gate { get; } = new(1, 1);
 
         public string? AccessToken { get; private set; }
 
-        public string? RefreshToken { get; private set; }
+        public string? RefreshToken { get; private set; } = credentialStore.GetRefreshToken(companyKey);
 
         public FelApiSession Store(AgentTokenResponse response)
         {
             AccessToken = response.AccessToken;
-            RefreshToken = string.IsNullOrEmpty(response.RefreshToken) ? RefreshToken : response.RefreshToken;
+            if (!string.IsNullOrEmpty(response.RefreshToken))
+            {
+                RefreshToken = response.RefreshToken;
+                credentialStore.SaveRefreshToken(companyKey, response.RefreshToken);
+            }
+
             return new FelApiSession(
                 response.TenantId,
                 response.CompanyId,
@@ -373,6 +376,7 @@ public sealed class FelApiClient(
         {
             AccessToken = null;
             RefreshToken = null;
+            credentialStore.ClearRefreshToken(companyKey);
         }
     }
 }

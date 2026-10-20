@@ -11,3 +11,4 @@
 **/*.pem
 **/*.key
 TestResults/
+secrets/

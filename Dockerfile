@@ -15,6 +15,14 @@ RUN dotnet publish "WisFel.Worker.csproj" \
 FROM mcr.microsoft.com/dotnet/runtime:10.0 AS final
 WORKDIR /app
 COPY --from=build /app/publish .
+
+# Agent token store and its Data Protection key ring. An empty named volume mounted here inherits these
+# permissions, so the non-root user can write it.
+RUN mkdir -p /var/lib/wis-fel-worker \
+    && chown $APP_UID /var/lib/wis-fel-worker \
+    && chmod 700 /var/lib/wis-fel-worker
+ENV FelApi__TokenStorePath=/var/lib/wis-fel-worker
+
 USER $APP_UID
 
 ENTRYPOINT ["dotnet", "WisFel.Worker.dll"]

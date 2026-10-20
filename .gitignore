@@ -16,3 +16,4 @@ TestResults/
 
 # Local configuration and secrets
 appsettings.*.local.json
+secrets/

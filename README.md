@@ -27,7 +27,7 @@ Cada empresa SAE tiene una base de datos independiente. El cliente comparte el s
 
 ## Estado de este repositorio
 
-Este repositorio contiene la solución, el proyecto Worker, configuración Docker, el modelo de configuración/licencia de empresas SAE, la base reutilizable para consultar SAE y componer un JSON provisional, y el cliente HTTP del API (handshake, refresh, latido y reporte de estados). La conexión de desarrollo a SQL Server se configura mediante User Secrets y, en Development, el worker aplica migraciones al arrancar.
+Este repositorio contiene la solución, el proyecto Worker, configuración Docker, el modelo de configuración/licencia de empresas SAE, la base reutilizable para consultar SAE y componer un JSON provisional, el cliente HTTP del API (handshake, refresh, latido y reporte de estados) y el almacén seguro de credenciales y tokens del agente. La conexión de desarrollo a SQL Server se configura mediante User Secrets y, en Development, el worker aplica migraciones al arrancar.
 
 Pendientes, ya con contrato de API definido en [`api-architecture.md`](api-architecture.md): el consumo automático de la cola, el bucle de latido y la sincronización del estado de licencia hacia `SaeCompanies`, la atención del comando `ResendDocument`, y los providers por certificador y país. El cliente HTTP ya existe pero todavía nadie lo invoca: `Worker` no lo llama.
 
@@ -92,6 +92,7 @@ Hoy el `agentId` y el secreto se leen de la configuración, indexados por el `Id
 | `FelApi:BaseUrl` | Sí (vacía) | Raíz del API, por ejemplo `https://fel.example.com` |
 | `FelApi:WorkerVersion` | Sí | Versión que se reporta en handshake y latido |
 | `FelApi:MaxAttempts` / `FelApi:RetryBaseDelay` | Opcional | Intentos (3) y base del backoff (1 s) |
+| `FelApi:TokenStorePath` | Sí | Raíz del almacén de tokens; en el contenedor apunta al volumen |
 | `FelApi:Agents:<SaeCompanyId>:AgentId` | **No** | GUID del agente de esa empresa |
 | `FelApi:Agents:<SaeCompanyId>:Secret` | **No** | Secreto del agente |
 
@@ -102,7 +103,33 @@ dotnet user-secrets set "FelApi:Agents:1:Secret" "<secreto-del-agente>" --projec
 
 En Docker se pasan como variables de entorno con `__` como separador: `FelApi__Agents__1__Secret`. La configuración del API se valida en el primer uso del cliente, no al arrancar, para que una instalación sin API configurada siga levantando.
 
-El **refresh token solo vive en memoria**: no se escribe en FEL ni en disco, porque reusar uno ya rotado revoca toda la familia. Al reiniciar, el worker rehace el handshake con el secreto del agente; si el API rechaza el refresh con 401, el cliente también vuelve al handshake. Debe existir un único proceso worker por instalación para no competir por la misma familia de tokens.
+### Almacén seguro de secretos y tokens
+
+`IAgentCredentialStore` es el único punto del worker que toca secretos de agente. Su implementación,
+`ProtectedAgentCredentialStore`, separa dos cosas:
+
+- **Entrada**: el `agentId` y el secreto siempre vienen de configuración y nunca se escriben a disco. En
+  desarrollo llegan de User Secrets; en Docker, de archivos montados en `/run/secrets`.
+- **Refresh token**: se persiste **cifrado** con ASP.NET Core Data Protection en
+  `{FelApi:TokenStorePath}/tokens/agent-{empresa}.token`, con permisos `0600`, escritura atómica y el anillo
+  de claves en `{FelApi:TokenStorePath}/keys`. Así un reinicio **no** rehace handshake: la primera llamada usa
+  `POST /agent/token/refresh`. Si el archivo no se puede descifrar (anillo de claves perdido, archivo de otra
+  instalación) se descarta con un aviso y el worker vuelve al handshake; si no se puede escribir, el latido
+  sigue funcionando con el token en memoria. Nunca se guarda en FEL ni aparece en logs.
+
+Dentro del contenedor `FelApi:TokenStorePath` es `/var/lib/wis-fel-worker`, un volumen nombrado con permisos
+`700` para el usuario no root de la imagen. Sin ese volumen el almacén vive en la capa efímera del contenedor
+y cada reinicio rehace handshake: funciona, pero pierde el beneficio.
+
+**No se implementan DPAPI ni Keychain propios.** El artefacto que se distribuye es un contenedor Linux y
+ninguna de las dos APIs existe ahí, así que serían código muerto; el almacén seguro del contenedor son los
+secretos montados más el cifrado en reposo sobre el volumen. Cuando el proceso sí corre en Windows —un
+`dotnet run` de desarrollo— Data Protection cifra su anillo de claves con **DPAPI** (`ProtectKeysWithDpapi`),
+sin código criptográfico propio en el repositorio.
+
+Reusar un refresh token ya rotado revoca toda la familia, así que debe existir un **único proceso worker por
+instalación**: dos contenedores con la misma credencial de agente se invalidan mutuamente. Si el API rechaza
+el refresh con 401, el cliente borra el token guardado y vuelve al handshake.
 
 ### Reporte de estados
 
@@ -298,7 +325,25 @@ docker compose down
 
 Compose compila una imagen para la arquitectura de la máquina local. Para distribuir imágenes a máquinas con arquitecturas diferentes, se deben publicar las arquitecturas destino (por ejemplo, `linux/amd64` y `linux/arm64`) con Docker Buildx.
 
-La base SAE/FEL debe estar en una instancia SQL Server accesible desde la red del contenedor. No uses `localhost` como servidor SQL desde dentro del contenedor, excepto si configuras explícitamente una ruta hacia el host; usa el DNS o IP alcanzable desde Docker y permite el tráfico SQL Server en la red/firewall. Los User Secrets del host no se copian al contenedor; falta definir la configuración segura de SQL para instalaciones Docker.
+La base SAE/FEL debe estar en una instancia SQL Server accesible desde la red del contenedor. No uses `localhost` como servidor SQL desde dentro del contenedor, excepto si configuras explícitamente una ruta hacia el host; usa el DNS o IP alcanzable desde Docker y permite el tráfico SQL Server en la red/firewall.
+
+Los User Secrets del host no se copian al contenedor: en Docker los secretos se montan como archivos y el worker los lee con `AddKeyPerFile("/run/secrets")`. Crea el directorio `secrets/` (ignorado por git y por Docker) con un archivo por clave antes del primer `docker compose up`:
+
+```bash
+mkdir -p secrets && chmod 700 secrets
+printf '%s' '<cadena-de-conexion>' > secrets/ConnectionStrings__FEL
+printf '%s' '<guid-del-agente>'    > secrets/FelApi__Agents__1__AgentId
+printf '%s' '<secreto-del-agente>' > secrets/FelApi__Agents__1__Secret
+chmod 600 secrets/*
+```
+
+| Archivo en `secrets/` | Clave de configuración |
+| --- | --- |
+| `ConnectionStrings__FEL` | `ConnectionStrings:FEL` |
+| `FelApi__Agents__1__AgentId` | `FelApi:Agents:1:AgentId` |
+| `FelApi__Agents__1__Secret` | `FelApi:Agents:1:Secret` |
+
+El número del nombre es el `Id` de la fila en `dbo.SaeCompanies`; agrega un archivo y una entrada en `compose.yaml` por cada empresa que atienda la instalación. Los secretos montados tienen prioridad sobre `environment:` y sobre User Secrets, así que nunca hace falta poner una credencial en `compose.yaml`. El volumen `worker-state` guarda el almacén de tokens y debe respaldarse o descartarse como dato sensible.
 
 ## Compilar sin Docker
 

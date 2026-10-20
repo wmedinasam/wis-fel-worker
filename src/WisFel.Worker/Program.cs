@@ -1,3 +1,4 @@
+using Microsoft.AspNetCore.DataProtection;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using WisFel.Worker;
@@ -6,6 +7,11 @@ using WisFel.Worker.Data;
 using WisFel.Worker.Sae;
 
 var builder = Host.CreateApplicationBuilder(args);
+
+// Docker/Compose secrets: a file /run/secrets/FelApi__Agents__1__Secret becomes FelApi:Agents:1:Secret.
+// Added last on purpose, so a mounted secret wins over environment variables and User Secrets.
+builder.Configuration.AddKeyPerFile("/run/secrets", optional: true);
+
 builder.Services.AddDbContext<FelDbContext>(options =>
     options.UseSqlServer(builder.Configuration.GetConnectionString("FEL")));
 builder.Services.AddSingleton<IDocumentSendPolicy, DocumentSendPolicy>();
@@ -26,6 +32,18 @@ builder.Services.AddHttpClient(FelApiClient.HttpClientName, (serviceProvider, cl
         // Reuse the TLS connection between heartbeats instead of renegotiating it every 30 seconds.
         PooledConnectionLifetime = TimeSpan.FromMinutes(5)
     });
+
+var tokenStoreRoot = builder.Configuration["FelApi:TokenStorePath"] ?? FelApiOptions.DefaultTokenStorePath;
+var dataProtection = builder.Services.AddDataProtection()
+    .SetApplicationName("WisFel.Worker")
+    .PersistKeysToFileSystem(new DirectoryInfo(Path.Combine(tokenStoreRoot, "keys")));
+if (OperatingSystem.IsWindows())
+{
+    // On Linux the key ring is protected by the volume permissions instead.
+    dataProtection.ProtectKeysWithDpapi();
+}
+
+builder.Services.AddSingleton<IAgentCredentialStore, ProtectedAgentCredentialStore>();
 builder.Services.AddSingleton<IFelApiClient, FelApiClient>();
 builder.Services.AddHostedService<Worker>();
 

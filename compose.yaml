@@ -8,3 +8,24 @@ services:
     environment:
       DOTNET_ENVIRONMENT: Production
       Logging__LogLevel__Default: Information
+      FelApi__BaseUrl: https://fel.example.com
+      FelApi__WorkerVersion: 1.0.0
+    # Secrets are mounted as files under /run/secrets and read as configuration keys; never put them in
+    # environment or in this file. Create ./secrets/<name> on the installation, outside version control.
+    secrets:
+      - ConnectionStrings__FEL
+      - FelApi__Agents__1__AgentId
+      - FelApi__Agents__1__Secret
+    volumes:
+      - worker-state:/var/lib/wis-fel-worker
+
+secrets:
+  ConnectionStrings__FEL:
+    file: ./secrets/ConnectionStrings__FEL
+  FelApi__Agents__1__AgentId:
+    file: ./secrets/FelApi__Agents__1__AgentId
+  FelApi__Agents__1__Secret:
+    file: ./secrets/FelApi__Agents__1__Secret
+
+volumes:
+  worker-state:
