@@ -1,5 +1,7 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
 using WisFel.Worker;
+using WisFel.Worker.Api;
 using WisFel.Worker.Data;
 using WisFel.Worker.Sae;
 
@@ -9,6 +11,22 @@ builder.Services.AddDbContext<FelDbContext>(options =>
 builder.Services.AddSingleton<IDocumentSendPolicy, DocumentSendPolicy>();
 builder.Services.AddSingleton<ISaeQueryExecutor, SqlSaeQueryExecutor>();
 builder.Services.AddScoped<ISaeDocumentReader, SaeDocumentReader>();
+// Validated on first use, not at startup: the worker still boots on installations that have no API
+// configuration yet.
+builder.Services.AddOptions<FelApiOptions>().Bind(builder.Configuration.GetSection("FelApi"));
+builder.Services.AddSingleton<IValidateOptions<FelApiOptions>, FelApiOptionsValidator>();
+builder.Services.AddHttpClient(FelApiClient.HttpClientName, (serviceProvider, client) =>
+    {
+        var apiOptions = serviceProvider.GetRequiredService<IOptions<FelApiOptions>>().Value;
+        client.BaseAddress = new Uri($"{apiOptions.BaseUrl.TrimEnd('/')}/");
+    })
+    .SetHandlerLifetime(Timeout.InfiniteTimeSpan)
+    .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
+    {
+        // Reuse the TLS connection between heartbeats instead of renegotiating it every 30 seconds.
+        PooledConnectionLifetime = TimeSpan.FromMinutes(5)
+    });
+builder.Services.AddSingleton<IFelApiClient, FelApiClient>();
 builder.Services.AddHostedService<Worker>();
 
 var host = builder.Build();

@@ -27,9 +27,9 @@ Cada empresa SAE tiene una base de datos independiente. El cliente comparte el s
 
 ## Estado de este repositorio
 
-Este repositorio contiene la solución, el proyecto Worker, configuración Docker, el modelo de configuración/licencia de empresas SAE y la base reutilizable para consultar SAE y componer un JSON provisional. La conexión de desarrollo a SQL Server se configura mediante User Secrets y, en Development, el worker aplica migraciones al arrancar.
+Este repositorio contiene la solución, el proyecto Worker, configuración Docker, el modelo de configuración/licencia de empresas SAE, la base reutilizable para consultar SAE y componer un JSON provisional, y el cliente HTTP del API (handshake, refresh, latido y reporte de estados). La conexión de desarrollo a SQL Server se configura mediante User Secrets y, en Development, el worker aplica migraciones al arrancar.
 
-Pendientes, ya con contrato de API definido en [`api-architecture.md`](api-architecture.md): el consumo automático de la cola, el cliente HTTP del API (handshake, refresh, latido y reporte de estados), los providers por certificador y país, y la sincronización del estado de licencia.
+Pendientes, ya con contrato de API definido en [`api-architecture.md`](api-architecture.md): el consumo automático de la cola, el bucle de latido y la sincronización del estado de licencia hacia `SaeCompanies`, la atención del comando `ResendDocument`, y los providers por certificador y país. El cliente HTTP ya existe pero todavía nadie lo invoca: `Worker` no lo llama.
 
 Las migraciones crean `FEL` si hace falta, mantienen `SaeCompanies`, `SaeCommonQueries`, `SaeDocumentQueries` y `dbo.Documents` para la cola. Todavía no se incluyen tablas de detalle, stored procedures ni el trigger de SAE.
 
@@ -64,9 +64,9 @@ El worker consume el API como agente autenticado. La cola local es la fuente de 
 
 ### Transporte
 
-El API expone HTTPS/REST con JWT; **no ofrece sockets ni WebSocket**, y los comandos se entregan en la respuesta del latido. Por eso el worker no abre sockets crudos: usa un `HttpClient` tipado por `IHttpClientFactory`, con `PooledConnectionLifetime` y keep-alive para reutilizar la conexión TLS entre latidos en lugar de renegociarla cada 30 segundos. Si más adelante el API publica un canal persistente (WebSocket o SignalR), el cliente se puede sustituir sin tocar la cola ni los providers; no lo implementes antes de que exista ese contrato.
+El API expone HTTPS/REST con JWT; **no ofrece sockets ni WebSocket**, y los comandos se entregan en la respuesta del latido. Por eso el worker no abre sockets crudos: `FelApiClient` (en `src/WisFel.Worker/Api/`) usa un `HttpClient` de `IHttpClientFactory` con `PooledConnectionLifetime` y keep-alive para reutilizar la conexión TLS entre latidos en lugar de renegociarla cada 30 segundos. Si más adelante el API publica un canal persistente (WebSocket o SignalR), el cliente se puede sustituir sin tocar la cola ni los providers; no lo implementes antes de que exista ese contrato.
 
-Resiliencia esperada: reintentos con backoff exponencial y jitter, respetar `Retry-After` en las respuestas 429, y seguir encolando en `dbo.Documents` mientras no haya red. Perder el API no debe detener la captura de documentos.
+Resiliencia: `FelApiRetry.NextDelay` aplica backoff exponencial con jitter, respeta `Retry-After` (delta o fecha) en 429 y 503, y no reintenta respuestas no transitorias; el número de intentos se configura con `FelApi:MaxAttempts`. La cola sigue llenándose en `dbo.Documents` mientras no haya red: perder el API no debe detener la captura de documentos.
 
 ### Endpoints que consume
 
@@ -84,6 +84,25 @@ Manejo de respuestas: el access token dura 15 minutos y el refresh de agente 30 
 ### Credenciales del agente
 
 Hay **una credencial de agente por empresa SAE**: cada fila de `dbo.SaeCompanies` se asocia a un `agentId` y a los GUID de tenant y empresa del API, de modo que la licencia y los documentos queden separados por empresa igual que en la plataforma. El secreto se muestra una sola vez al crear el agente y vive en User Secrets o variables de entorno, junto a la cadena de conexión; no se versiona, no va en Compose y no se registra en logs.
+
+Hoy el `agentId` y el secreto se leen de la configuración, indexados por el `Id` de la fila en `dbo.SaeCompanies`, que es el `companyKey` que recibe `IFelApiClient`. `FelApi:BaseUrl` debe ser HTTPS, salvo que apunte a `localhost` para probar contra el API de desarrollo:
+
+| Clave | Versionada | Uso |
+| --- | --- | --- |
+| `FelApi:BaseUrl` | Sí (vacía) | Raíz del API, por ejemplo `https://fel.example.com` |
+| `FelApi:WorkerVersion` | Sí | Versión que se reporta en handshake y latido |
+| `FelApi:MaxAttempts` / `FelApi:RetryBaseDelay` | Opcional | Intentos (3) y base del backoff (1 s) |
+| `FelApi:Agents:<SaeCompanyId>:AgentId` | **No** | GUID del agente de esa empresa |
+| `FelApi:Agents:<SaeCompanyId>:Secret` | **No** | Secreto del agente |
+
+```bash
+dotnet user-secrets set "FelApi:Agents:1:AgentId" "<guid-del-agente>" --project src/WisFel.Worker/WisFel.Worker.csproj
+dotnet user-secrets set "FelApi:Agents:1:Secret" "<secreto-del-agente>" --project src/WisFel.Worker/WisFel.Worker.csproj
+```
+
+En Docker se pasan como variables de entorno con `__` como separador: `FelApi__Agents__1__Secret`. La configuración del API se valida en el primer uso del cliente, no al arrancar, para que una instalación sin API configurada siga levantando.
+
+El **refresh token solo vive en memoria**: no se escribe en FEL ni en disco, porque reusar uno ya rotado revoca toda la familia. Al reiniciar, el worker rehace el handshake con el secreto del agente; si el API rechaza el refresh con 401, el cliente también vuelve al handshake. Debe existir un único proceso worker por instalación para no competir por la misma familia de tokens.
 
 ### Reporte de estados
 
@@ -103,13 +122,15 @@ Los nombres de estado del API no coinciden con los de la cola local. El enum loc
 | `Rejected` | `Error` |
 | `Failed` | `Error`, o `Retrying` si aún quedan reintentos |
 
+`DocumentStatusReportMapper` deriva la clave y traduce el estado; el tipo `DocumentStatusReport` no tiene campos donde quepan `Request`, `Response` ni `Pdf`. La cola local todavía no guarda `attemptCount`, `issuedAtUtc`, `certifiedAtUtc` ni `errorCode`, así que el llamador los pasa al mapper y se envían nulos cuando no hay dato.
+
 Se envían metadatos: `documentType`, `series`, `number` (los datos SAT), `authorizationNumber` con el UUID del certificador, `errorCode` y `errorMessage` derivados del resultado, `attemptCount`, `issuedAtUtc` y `certifiedAtUtc`. **Nunca** se envían `Request`, `Response` ni `Pdf`: el documento firmado no sale del worker y el API solo guarda metadatos, así que los mensajes de error no deben arrastrar el payload.
 
 `branchId` es opcional y es el GUID de una sucursal del API; la cola solo tiene `LocationId` como entero y todavía no hay mapeo acordado, por lo que se envía `null`. Un `branchId` que no pertenezca a la empresa del agente hace que el API rechace ese documento en `rejected[]`.
 
 ### Comandos
 
-Los comandos llegan únicamente en el latido, con lease de 30 segundos y un máximo de 20 por respuesta, y se confirman enviando su id en `acknowledgedCommandIds` en el siguiente latido. El único comando definido es `ResendDocument`, con `payload` `{"documentId":"…","idempotencyKey":"…"}`: el worker localiza el documento por `idempotencyKey`, **consulta primero al certificador si ya se certificó** para no duplicar, reenvía si corresponde y reporta el estado resultante.
+Los comandos llegan únicamente en el latido, con lease de 30 segundos y un máximo de 20 por respuesta, y se confirman enviando su id en `acknowledgedCommandIds` en el siguiente latido. El cliente los entrega sin interpretarlos: `PendingAgentCommand.Payload` es un `JsonObject` tal como llegó. El único comando definido es `ResendDocument`, con `payload` `{"documentId":"…","idempotencyKey":"…"}`: el worker localiza el documento por `idempotencyKey`, **consulta primero al certificador si ya se certificó** para no duplicar, reenvía si corresponde y reporta el estado resultante.
 
 ## Certificadores y países
 
