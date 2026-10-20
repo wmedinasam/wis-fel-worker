@@ -7,6 +7,8 @@ namespace WisFel.Worker.Api;
 /// </summary>
 public interface IAgentCredentialStore
 {
+    bool IsConfigured(string companyKey);
+
     FelApiAgentCredentials GetCredentials(string companyKey);
 
     string? GetRefreshToken(string companyKey);

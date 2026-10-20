@@ -4,6 +4,7 @@ using Microsoft.Extensions.Options;
 using WisFel.Worker;
 using WisFel.Worker.Api;
 using WisFel.Worker.Data;
+using WisFel.Worker.Queue;
 using WisFel.Worker.Sae;
 
 var builder = Host.CreateApplicationBuilder(args);
@@ -45,6 +46,11 @@ if (OperatingSystem.IsWindows())
 
 builder.Services.AddSingleton<IAgentCredentialStore, ProtectedAgentCredentialStore>();
 builder.Services.AddSingleton<IFelApiClient, FelApiClient>();
+builder.Services.AddScoped<IAgentLicenseSynchronizer, AgentLicenseSynchronizer>();
+
+builder.Services.AddOptions<WorkerOptions>().Bind(builder.Configuration.GetSection("Worker"));
+builder.Services.AddSingleton<IValidateOptions<WorkerOptions>, WorkerOptionsValidator>();
+builder.Services.AddScoped<IDocumentQueueProcessor, DocumentQueueProcessor>();
 builder.Services.AddHostedService<Worker>();
 
 var host = builder.Build();

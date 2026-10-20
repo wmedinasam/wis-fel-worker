@@ -29,7 +29,7 @@ Cada empresa SAE tiene una base de datos independiente. El cliente comparte el s
 
 Este repositorio contiene la solución, el proyecto Worker, configuración Docker, el modelo de configuración/licencia de empresas SAE, la base reutilizable para consultar SAE y componer un JSON provisional, el cliente HTTP del API (handshake, refresh, latido y reporte de estados) y el almacén seguro de credenciales y tokens del agente. La conexión de desarrollo a SQL Server se configura mediante User Secrets y, en Development, el worker aplica migraciones al arrancar.
 
-Pendientes, ya con contrato de API definido en [`api-architecture.md`](api-architecture.md): el consumo automático de la cola, el bucle de latido y la sincronización del estado de licencia hacia `SaeCompanies`, la atención del comando `ResendDocument`, y los providers por certificador y país. El cliente HTTP ya existe pero todavía nadie lo invoca: `Worker` no lo llama.
+Pendientes: la certificación y los providers por certificador y país, que esperan el contrato de configuración del certificador en el API, y la atención del comando `ResendDocument`, que depende de poder consultar al certificador. El bucle ya corre: sincroniza licencia, consume la cola y late.
 
 Las migraciones crean `FEL` si hace falta, mantienen `SaeCompanies`, `SaeCommonQueries`, `SaeDocumentQueries` y `dbo.Documents` para la cola. Todavía no se incluyen tablas de detalle, stored procedures ni el trigger de SAE.
 
@@ -56,7 +56,42 @@ La tabla también tiene un `Id` identity para identificar cada fila. El índice 
 | `Response` | `nvarchar(max) NULL` | JSON o XML Response formado/recibido |
 | `Pdf` | `varbinary(max) NULL` | Archivo PDF |
 
-Los datos SAT, `Observations`, `Request`, `Response` y `Pdf` pueden ser nulos al insertar; se guardarán cuando se produzcan durante el procesamiento. Request y Response aceptan JSON o XML como texto, sin validación del formato por SQL Server. El PDF se guarda en binario dentro de FEL. `Processing` está disponible para que una futura implementación reserve el documento durante su envío. El Worker aún no consume esta cola ni llama al API.
+Los datos SAT, `Observations`, `Request`, `Response` y `Pdf` pueden ser nulos al insertar; se guardarán cuando se produzcan durante el procesamiento. Request y Response aceptan JSON o XML como texto, sin validación del formato por SQL Server. El PDF se guarda en binario dentro de FEL. `Processing` sigue reservado para cuando exista certificador y haya un envío que proteger: el consumo actual de la cola no cambia `Status`.
+
+## Consumo de la cola
+
+`Worker` es un único bucle secuencial, así que ninguna pasada se solapa con otra. En cada tick
+(`Worker:PollInterval`, 5 s) hace, en orden: sincronizar licencia si toca, procesar la cola y latir si toca.
+
+| Clave | Valor por defecto | Uso |
+| --- | --- | --- |
+| `Worker:PollInterval` | `00:00:05` | Cada cuánto se revisa la cola |
+| `Worker:BatchSize` | `50` | Documentos por empresa y pasada; máximo 100 por el límite del API |
+| `Worker:HeartbeatInterval` | `00:00:30` | Latido |
+| `Worker:LicenseSyncInterval` | `00:10:00` | Refresco del estado de licencia |
+
+`DocumentQueueProcessor` hace una pasada por empresa:
+
+1. `IDocumentSendPolicy` decide; una empresa sin licencia se salta completa y no se lee SAE.
+2. Toma los documentos con `Status = Pending AND Request IS NULL`, ordenados por `Id`.
+3. Arma el JSON con el lector SAE y lo guarda en `Documents.Request` con un solo `SaveChanges`.
+4. Reporta los metadatos del lote con estado `Pending`. Si el reporte falla, el JSON ya está guardado y solo
+   se pierde ese reporte; el estado definitivo lo contará la certificación.
+
+**No cambia `Status`.** Sin certificador no hay transición que tenga sentido, y dejar filas en `Processing`
+sin dueño sería peor: un documento con `Request` guardado es justamente "listo para certificar", y ese mismo
+filtro hace la pasada re-entrante y segura ante un reinicio, sin migraciones ni columnas de lease.
+
+Si la lectura SAE de un documento falla, se registra un aviso con su clave natural —sin el texto de la
+consulta ni el payload— y la pasada sigue con los demás; ese documento se reintenta en el siguiente ciclo.
+Todavía no hay corte de reintentos ni marca `Failed`: hace falta una columna de intentos o de fecha.
+
+El latido envía `workerVersion` y `acknowledgedCommandIds` vacío. Los comandos que lleguen se registran por
+`id` y `type` pero **no se confirman**: no se confirma lo que no se atendió, así el API los reentrega cuando
+expire el lease en vez de darlos por hechos. Atender `ResendDocument` necesita consultar al certificador.
+
+Si el API no está configurado (`FelApi:BaseUrl` vacía), el worker avisa una vez y queda inactivo: sin
+licencia no hay envío posible, y así no se repite el mismo error cada cinco segundos.
 
 ## Integración con el API FEL (nube)
 
@@ -180,7 +215,7 @@ Falta la pieza de configuración: el API todavía **no expone** un endpoint para
 }
 ```
 
-El nodo `Document` admite además las propiedades dinámicas de cabecera obtenidas desde SAE. El nodo de emisor/receptor y cada item aceptan objetos JSON flexibles porque aún falta acordar los campos y su mapeo. Las claves de `FreeFields` se serializan en orden ordinal para mantener una salida estable; los campos de cabecera no pueden sobrescribir los nodos reservados `Issuer`, `Receiver`, `Items` ni `FreeFields`. El resultado se puede guardar con `Document.StoreRequestJson()` en `Documents.Request`. El lector SAE construye este borrador para un documento individual; todavía no consume automáticamente la cola ni envía HTTP y el contrato fiscal final no está definido.
+El nodo `Document` admite además las propiedades dinámicas de cabecera obtenidas desde SAE. El nodo de emisor/receptor y cada item aceptan objetos JSON flexibles porque aún falta acordar los campos y su mapeo. Las claves de `FreeFields` se serializan en orden ordinal para mantener una salida estable; los campos de cabecera no pueden sobrescribir los nodos reservados `Issuer`, `Receiver`, `Items` ni `FreeFields`. El resultado se guarda con `Document.StoreRequestJson()` en `Documents.Request`. El lector SAE construye este borrador para un documento individual y `DocumentQueueProcessor` es quien lo invoca por cada fila encolada; el contrato fiscal final todavía no está definido.
 
 ## Consultas SAE configurables
 
@@ -225,7 +260,7 @@ Las consultas pueden usar `FOR JSON PATH, WITHOUT_ARRAY_WRAPPER` para producir o
 
 Al pasar a las consultas comunes, la migración traslada `ReceiverSql` a `CustomerSql` solo cuando el SQL coincide entre todos los tipos de una empresa/versión. Crea esa configuración común como deshabilitada y con `ProductSql` vacío para exigir que un DBA configure el producto desde `INVE` y habilite expresamente la fila. Si había consultas de cliente distintas por tipo, la migración se detiene sin eliminar datos: consolida primero `ReceiverSql` para esos tipos y vuelve a aplicar la migración. No habilites una configuración común hasta completar ambas consultas.
 
-El lector solo permite documentos `Pending`, exige que la empresa pertenezca al documento y que la política de licencia permita el envío. No cambia el estado ni llama `SaveChanges`; el componente que lo invoque debe persistir los cambios cuando corresponda. Las consultas configuradas son SQL ejecutable y el Worker no analiza su texto para impedir comandos de escritura. Por ello, la cuenta SQL que el Worker usa para conectarse a las bases SAE debe tener permisos de solo lectura; limita también quién puede modificar las tablas de consulta. El lector abre conexiones SAE para las secciones; no hay todavía consumo continuo de la cola ni administración de plantillas desde una UI.
+El lector solo permite documentos `Pending`, exige que la empresa pertenezca al documento y que la política de licencia permita el envío. No cambia el estado ni llama `SaveChanges`; el componente que lo invoque debe persistir los cambios cuando corresponda. Las consultas configuradas son SQL ejecutable y el Worker no analiza su texto para impedir comandos de escritura. Por ello, la cuenta SQL que el Worker usa para conectarse a las bases SAE debe tener permisos de solo lectura; limita también quién puede modificar las tablas de consulta. El lector abre conexiones SAE para las secciones; no hay administración de plantillas desde una UI.
 
 ### Seguridad del payload
 
@@ -262,7 +297,9 @@ El API es la autoridad de licenciamiento. El handshake y cada refresh devuelven 
 
 Ese valor se aplica con `SaeCompany.ApplyLicenseStatusFromCloud(...)`, que persiste el indicador y la fecha de actualización, y es lo que luego evalúa `IDocumentSendPolicy`. El worker no calcula expiraciones ni períodos de gracia por su cuenta.
 
-Hasta que se implemente la sincronización, las empresas nuevas quedan sin licencia y la política deniega la lectura para envío si la empresa no está configurada o no tiene licencia. No habilites manualmente `IsLicensed`. Aún no existe una transición que cambie el estado de `Documents` al denegarse por licencia.
+`AgentLicenseSynchronizer` aplica ese valor: cada `Worker:LicenseSyncInterval` (10 min por defecto) llama `POST /agent/token/refresh` por empresa configurada y guarda el resultado con `ApplyLicenseStatusFromCloud`. Un 403 deniega el envío, un valor desconocido también (deny-by-default), y un fallo de red deja la empresa como estaba: el worker nunca calcula expiraciones ni gracia. Una empresa sin credencial de agente configurada no se sincroniza y por tanto no envía.
+
+Las empresas nuevas quedan sin licencia hasta la primera sincronización y la política deniega la lectura para envío si la empresa no está configurada o no tiene licencia. No habilites manualmente `IsLicensed`. Aún no existe una transición que cambie el estado de `Documents` al denegarse por licencia.
 
 ## Desarrollo local con SQL Server
 

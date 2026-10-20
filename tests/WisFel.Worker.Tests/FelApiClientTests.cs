@@ -291,7 +291,7 @@ public class FelApiClientTests
     [Fact]
     public async Task APersistedRefreshTokenReplacesTheHandshakeAfterARestart()
     {
-        var store = new FakeCredentialStore("refresh-saved");
+        var store = CreateStore("refresh-saved");
         var handler = new StubHttpMessageHandler();
         handler.Enqueue(HttpStatusCode.OK, """{"accessToken":"access-9","refreshToken":"refresh-10"}""");
         handler.Enqueue(HttpStatusCode.OK, HeartbeatJson);
@@ -308,7 +308,7 @@ public class FelApiClientTests
     [Fact]
     public async Task ARejectedRefreshTokenIsDiscardedFromTheStore()
     {
-        var store = new FakeCredentialStore("refresh-stale");
+        var store = CreateStore("refresh-stale");
         var handler = new StubHttpMessageHandler();
         handler.Enqueue(HttpStatusCode.Unauthorized, "{}");
         handler.Enqueue(HttpStatusCode.OK, HandshakeJson);
@@ -325,7 +325,7 @@ public class FelApiClientTests
     [Fact]
     public async Task TheRefreshTokenIsPersistedOnHandshake()
     {
-        var store = new FakeCredentialStore();
+        var store = new FakeAgentCredentialStore();
         var handler = new StubHttpMessageHandler();
         handler.Enqueue(HttpStatusCode.OK, HandshakeJson);
         var client = CreateClient(handler, store);
@@ -335,7 +335,16 @@ public class FelApiClientTests
         Assert.Equal("refresh-1", store.GetRefreshToken(CompanyKey));
     }
 
-    private static FelApiClient CreateClient(StubHttpMessageHandler handler, FakeCredentialStore? store = null)
+    private static FakeAgentCredentialStore CreateStore(string refreshToken)
+    {
+        var store = new FakeAgentCredentialStore();
+        store.SaveRefreshToken(CompanyKey, refreshToken);
+        return store;
+    }
+
+    private static FelApiClient CreateClient(
+        StubHttpMessageHandler handler,
+        FakeAgentCredentialStore? store = null)
     {
         var options = new FelApiOptions
         {
@@ -353,27 +362,9 @@ public class FelApiClientTests
 
         return new FelApiClient(
             new StubHttpClientFactory(handler, new Uri($"{options.BaseUrl}/")),
-            store ?? new FakeCredentialStore(),
+            store ?? new FakeAgentCredentialStore(),
             Options.Create(options),
             NullLogger<FelApiClient>.Instance);
-    }
-
-    private sealed class FakeCredentialStore(string? refreshToken = null) : IAgentCredentialStore
-    {
-        private readonly Dictionary<string, string> refreshTokens = refreshToken is null
-            ? new Dictionary<string, string>(StringComparer.Ordinal)
-            : new Dictionary<string, string>(StringComparer.Ordinal) { [CompanyKey] = refreshToken };
-
-        public FelApiAgentCredentials GetCredentials(string companyKey) => companyKey == CompanyKey
-            ? new FelApiAgentCredentials { AgentId = AgentId, Secret = "agent-secret" }
-            : throw new InvalidOperationException($"No agent credential for {companyKey}.");
-
-        public string? GetRefreshToken(string companyKey) =>
-            refreshTokens.TryGetValue(companyKey, out var token) ? token : null;
-
-        public void SaveRefreshToken(string companyKey, string token) => refreshTokens[companyKey] = token;
-
-        public void ClearRefreshToken(string companyKey) => refreshTokens.Remove(companyKey);
     }
 
     private sealed record RecordedRequest(string Path, string? AccessToken, string Body);

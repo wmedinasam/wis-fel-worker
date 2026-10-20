@@ -25,6 +25,9 @@ public sealed class ProtectedAgentCredentialStore : IAgentCredentialStore
         protector = dataProtectionProvider.CreateProtector("WisFel.Worker.AgentRefreshToken");
     }
 
+    public bool IsConfigured(string companyKey) =>
+        !string.IsNullOrWhiteSpace(companyKey) && options.Value.Agents.ContainsKey(companyKey);
+
     public FelApiAgentCredentials GetCredentials(string companyKey)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(companyKey);

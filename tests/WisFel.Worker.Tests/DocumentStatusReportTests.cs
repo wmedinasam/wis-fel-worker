@@ -1,4 +1,3 @@
-using System.Reflection;
 using System.Text.Json;
 using WisFel.Worker.Api;
 using WisFel.Worker.Data;
@@ -10,7 +9,7 @@ public class DocumentStatusReportTests
     [Fact]
     public void IdempotencyKeyUsesTheQueueNaturalKey()
     {
-        var document = CreateDocument(DocumentStatus.Pending);
+        var document = TestDocuments.Create(status: DocumentStatus.Pending);
 
         Assert.Equal("7-3-FACT-4521", DocumentStatusReportMapper.IdempotencyKey(document));
     }
@@ -32,8 +31,8 @@ public class DocumentStatusReportTests
     public void ReportCarriesSatMetadataAndNoBranchMapping()
     {
         var certifiedAt = DateTimeOffset.Parse("2026-10-20T15:00:02Z");
-        var document = CreateDocument(
-            DocumentStatus.Signed,
+        var document = TestDocuments.Create(
+            status: DocumentStatus.Signed,
             uuid: "3F2504E0-4F89-11D3-9A0C-0305E82C3301",
             serial: "A",
             number: "123",
@@ -61,7 +60,7 @@ public class DocumentStatusReportTests
     [Fact]
     public void ReportNeverCarriesTheSignedPayload()
     {
-        var document = CreateDocument(DocumentStatus.Signed, request: """{"Document":{}}""");
+        var document = TestDocuments.Create(status: DocumentStatus.Signed, request: """{"Document":{}}""");
         document.StoreRequestJson("""{"Document":{"Issuer":{}}}""");
 
         var json = JsonSerializer.Serialize(
@@ -74,35 +73,4 @@ public class DocumentStatusReportTests
         Assert.DoesNotContain("Issuer", json, StringComparison.Ordinal);
     }
 
-    /// <summary>The queue rows are inserted by the SAE trigger, so Document has no public constructor.</summary>
-    private static Document CreateDocument(
-        DocumentStatus status,
-        string? uuid = null,
-        string? serial = null,
-        string? number = null,
-        string? observations = null,
-        string? request = null)
-    {
-        var document = (Document)Activator.CreateInstance(typeof(Document), nonPublic: true)!;
-
-        Set(document, nameof(Document.CompanyId), 7);
-        Set(document, nameof(Document.LocationId), 3);
-        Set(document, nameof(Document.InternalId), 4521);
-        Set(document, nameof(Document.DocumentType), "FACT");
-        Set(document, nameof(Document.InternalNumber), "4521");
-        Set(document, nameof(Document.InternalSerial), "F");
-        Set(document, nameof(Document.Status), status);
-        Set(document, nameof(Document.Uuid), uuid);
-        Set(document, nameof(Document.Serial), serial);
-        Set(document, nameof(Document.Number), number);
-        Set(document, nameof(Document.Observations), observations);
-        Set(document, nameof(Document.Request), request);
-
-        return document;
-    }
-
-    private static void Set(Document document, string propertyName, object? value) =>
-        typeof(Document)
-            .GetProperty(propertyName, BindingFlags.Public | BindingFlags.Instance)!
-            .SetValue(document, value);
 }
